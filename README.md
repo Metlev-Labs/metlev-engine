@@ -58,7 +58,7 @@ programs/
         ├── instructions/
         │   ├── mod.rs                  # Instruction exports
         │   ├── initialize.rs           # Initialize protocol config
-        │   ├── add_collateral.rs       # Register new collateral type
+        │   ├── register_collateral.rs       # Register new collateral type
         │   ├── deposit_collateral.rs   # Deposit SOL/USDC/other tokens
         │   ├── open_position.rs        # Create leveraged DLMM position
         │   ├── close_position.rs       # Close position and repay debt
@@ -146,7 +146,7 @@ pub struct LendingVault {
 
 2. **Basic Instructions**
    - `initialize` - Set up global protocol config (authority, pause state)
-   - `add_collateral` - Register new collateral types with risk parameters
+   - `register_collateral` - Register new collateral types with risk parameters
    - `deposit_collateral` - Accept deposits for any enabled collateral
    - Base account validation and PDA derivation
 
@@ -246,7 +246,7 @@ Risk parameters are **per-collateral**, allowing different configurations for vo
 | Interest Rate | 3% APR | Lower rate for stable collateral |
 | Oracle Max Age | 60 seconds | Max staleness for price feeds |
 
-> **Note**: Each collateral type can be added via `add_collateral` instruction with custom parameters.
+> **Note**: Each collateral type can be added via `register_collateral` instruction with custom parameters.
 
 ## Dependencies
 
@@ -330,7 +330,7 @@ anchor test
 - [x] Project planning and requirements
 - [] Project skeleton and base structure
 - [] Core state accounts (Config, CollateralConfig, Position, LendingVault)
-- [] Base instruction implementations (initialize, add_collateral, deposit, etc.)
+- [] Base instruction implementations (initialize, register_collateral, deposit, etc.)
 - [] Comprehensive test suite
 - [ ] Token transfers and vault management
 - [ ] Position opening (Meteora DLMM integration via CPI)

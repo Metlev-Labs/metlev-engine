@@ -52,4 +52,19 @@ pub mod metlev_engine {
     ) -> Result<()> {
         ctx.accounts.open(leverage)
     }
+
+    pub fn close_position(ctx: Context<ClosePosition>) -> Result<()> {
+        ctx.accounts.close()
+    }
+
+    pub fn liquidate(ctx: Context<Liquidate>) -> Result<()> {
+        ctx.accounts.liquidate()
+    }
+
+    pub fn update_pause_state(
+        ctx: Context<UpdateConfig>,
+        paused: bool,
+    ) -> Result<()> {
+        ctx.accounts.update_pause_state(paused)
+    }
 }

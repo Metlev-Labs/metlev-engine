@@ -39,5 +39,12 @@ pub mod metlev_engine {
         )
     }
 
+    pub fn deposit_collateral(
+        ctx: Context<DepositCollateral>,
+        amount: u64,
+    ) -> Result<()> {
+        ctx.accounts.deposit(&ctx.bumps, amount)
+    }
+
 
 }

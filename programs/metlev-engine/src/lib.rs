@@ -46,5 +46,10 @@ pub mod metlev_engine {
         ctx.accounts.deposit(&ctx.bumps, amount)
     }
 
-
+    pub fn open_position(
+        ctx: Context<OpenPosition>,
+        leverage: u64,
+    ) -> Result<()> {
+        ctx.accounts.open(leverage)
+    }
 }

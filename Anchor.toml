@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-metlev_engine = "9viJvWnSPMgBibr2edQM6nHwZTmUHy8JC8AKAbEcko8w"
+metlev_engine = "3hiGnNihh2eACtAU3d45cT6unWgwtPLsqKUmZE5kYma3"
 
 [registry]
 url = "https://api.apr.dev"

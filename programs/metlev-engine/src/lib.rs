@@ -7,7 +7,7 @@ mod utils;
 
 use instructions::*;
 
-declare_id!("9viJvWnSPMgBibr2edQM6nHwZTmUHy8JC8AKAbEcko8w");
+declare_id!("3hiGnNihh2eACtAU3d45cT6unWgwtPLsqKUmZE5kYma3");
 
 #[program]
 pub mod metlev_engine {

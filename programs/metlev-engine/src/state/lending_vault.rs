@@ -13,6 +13,8 @@ pub struct LendingVault {
     /// Last time interest was accrued
     pub last_update: i64,
     pub bump: u8,
+    pub sol_vault_bump:u8,
+    pub token_vault_bump:u8
 }
 
 impl LendingVault {

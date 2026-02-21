@@ -22,12 +22,28 @@ pub struct Initialize<'info> {
         init,
         payer = authority,
         space = LendingVault::DISCRIMINATOR.len()+LendingVault::INIT_SPACE,
-        seeds = [b"collateral_vault", mint.key().as_ref()],
+        seeds = [b"reserve_vault", mint.key().as_ref()],
         bump
     )]
     pub lending_vault: Account<'info, LendingVault>,
 
-    
+    #[account(
+        init,
+        token::mint = mint,
+        token::authority =lending_vault_token_account,
+        payer = authority,
+        seeds = [b"vault_token_account", mint.key().as_ref()],
+        bump
+
+    )]
+    pub lending_vault_token_account:InterfaceAccount<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"vault_sol_account"],
+        bump
+    )]
+    pub lending_vault_sol_account:SystemAccount<'info>,
 
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
@@ -51,6 +67,8 @@ impl<'info> Initialize<'info> {
             interest_rate_bps:350, // 3.5% in basis points
             last_update:Clock::get()?.unix_timestamp,
             bump:bumps.lending_vault,
+            sol_vault_bump:bumps.lending_vault_sol_account,
+            token_vault_bump:bumps.lending_vault_token_account,
         });
 
         Ok(())

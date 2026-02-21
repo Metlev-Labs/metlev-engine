@@ -24,7 +24,7 @@ pub struct CollateralConfig {
 
     /// Price oracle account (Pyth/Switchboard)
     pub oracle: Pubkey,
-
+    
     /// Maximum loan-to-value ratio (basis points, 7500 = 75%)
     pub max_ltv: u16,
 

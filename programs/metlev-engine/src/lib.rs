@@ -89,4 +89,37 @@ pub mod metlev_engine {
     ) -> Result<()> {
         ctx.accounts.update_pause_state(paused)
     }
+
+    pub fn update_collateral_enabled(
+        ctx: Context<UpdateCollateralConfig>,
+        _mint: Pubkey,
+        enabled: bool,
+    ) -> Result<()> {
+        ctx.accounts.update_enabled(enabled)
+    }
+
+    pub fn update_collateral_ltv_params(
+        ctx: Context<UpdateCollateralConfig>,
+        _mint: Pubkey,
+        max_ltv: Option<u16>,
+        liquidation_threshold: Option<u16>,
+    ) -> Result<()> {
+        ctx.accounts.update_ltv_params(max_ltv, liquidation_threshold)
+    }
+
+    pub fn update_collateral_liquidation_penalty(
+        ctx: Context<UpdateCollateralConfig>,
+        _mint: Pubkey,
+        penalty: u16,
+    ) -> Result<()> {
+        ctx.accounts.update_liquidation_penalty(penalty)
+    }
+
+    pub fn update_collateral_min_deposit(
+        ctx: Context<UpdateCollateralConfig>,
+        _mint: Pubkey,
+        min_deposit: u64,
+    ) -> Result<()> {
+        ctx.accounts.update_min_deposit(min_deposit)
+    }
 }

@@ -1,0 +1,91 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+      - "fix/**"
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check branch naming convention
+        if: github.event_name == 'push'
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          if [[ "$BRANCH" != "main" && ! "$BRANCH" =~ ^(feat|fix|chore|docs|refactor)/.+ ]]; then
+            echo "Branch '$BRANCH' does not follow naming convention."
+            echo "Required format: feat/<name>, fix/<name>, chore/<name>, docs/<name>, refactor/<name>"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89.0"
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache Solana CLI
+        uses: actions/cache@v4
+        id: cache-solana
+        with:
+          path: ~/.local/share/solana/install
+          key: solana-v3.1.6
+
+      - name: Install Solana CLI
+        if: steps.cache-solana.outputs.cache-hit != 'true'
+        run: sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.6/install)"
+
+      - name: Add Solana to PATH
+        run: echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Cache Anchor CLI
+        uses: actions/cache@v4
+        id: cache-anchor
+        with:
+          path: |
+            ~/.avm
+            ~/.cargo/bin/avm
+          key: anchor-0.32.1
+
+      - name: Install Anchor CLI
+        if: steps.cache-anchor.outputs.cache-hit != 'true'
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor avm --force
+          avm install 0.32.1
+          avm use 0.32.1
+
+      - name: Add Anchor to PATH
+        run: echo "$HOME/.avm/bin" >> $GITHUB_PATH
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "yarn"
+          cache-dependency-path: yarn.lock
+
+      - name: Install Node dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Generate Solana keypair
+        run: solana-keygen new --no-bip39-passphrase --silent
+
+      - name: Build program
+        run: anchor build
+
+      - name: Run tests
+        run: anchor test --skip-build

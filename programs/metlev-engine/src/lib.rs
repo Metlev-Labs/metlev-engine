@@ -17,6 +17,10 @@ pub mod metlev_engine {
         ctx.accounts.initialize(&ctx.bumps)
     }
 
+    pub fn initialize_lending_vault(ctx: Context<InitializeLendingVault>) -> Result<()> {
+        ctx.accounts.initialize_lending_vault(&ctx.bumps)
+    }
+
     pub fn register_collateral(
         ctx: Context<RegisterCollateral>,
         oracle: Pubkey,
@@ -52,7 +56,18 @@ pub mod metlev_engine {
     ) -> Result<()> {
         ctx.accounts.deposit(&ctx.bumps, amount)
     }
+    pub fn supply(
+        ctx: Context<Supply>,
+        amount: u64,
+    ) -> Result<()> {
+        ctx.accounts.supply(&ctx.bumps, amount)
+    }
 
+    pub fn withdraw(
+        ctx: Context<Withdraw>,
+    ) -> Result<()> {
+        ctx.accounts.withdraw()
+    }
     pub fn open_position(
         ctx: Context<OpenPosition>,
         leverage: u64,

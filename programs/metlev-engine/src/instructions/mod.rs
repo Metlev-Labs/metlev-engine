@@ -8,6 +8,7 @@ pub mod close_position;
 pub mod liquidate;
 pub mod update_config;
 pub mod supply;
+pub mod withdraw;
 
 pub use initialize::*;
 pub use initialize_lending_vault::*;
@@ -19,3 +20,4 @@ pub use close_position::*;
 pub use liquidate::*;
 pub use update_config::*;
 pub use supply::*;
+pub use withdraw::*;

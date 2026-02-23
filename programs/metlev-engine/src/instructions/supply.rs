@@ -73,8 +73,6 @@ impl<'info> Supply<'info> {
             accounts,
         );
 
-        transfer(ctx, amount)?;
-
-        Ok(())
+        transfer(ctx, amount)
     }
 }

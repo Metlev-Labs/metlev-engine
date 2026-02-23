@@ -34,7 +34,6 @@ describe("Lending Vault", () => {
       program.programId
     );
 
-    // Airdrop to LP users
     for (const user of [lp, lp2]) {
       const sig = await provider.connection.requestAirdrop(
         user.publicKey,
@@ -43,7 +42,6 @@ describe("Lending Vault", () => {
       await provider.connection.confirmTransaction(sig);
     }
 
-    // Initialize protocol if needed
     try {
       await program.account.config.fetch(configPda);
       console.log("Protocol already initialized, skipping...");
@@ -58,7 +56,6 @@ describe("Lending Vault", () => {
         .rpc();
     }
 
-    // Initialize lending vault if needed
     try {
       await program.account.lendingVault.fetch(lendingVaultPda);
       console.log("Lending vault already initialized, skipping...");
@@ -196,6 +193,161 @@ describe("Lending Vault", () => {
 
       const vaultState = await program.account.lendingVault.fetch(lendingVaultPda);
       console.log("Total vault supplied:", vaultState.totalSupplied.toNumber() / LAMPORTS_PER_SOL, "SOL");
+    });
+  });
+
+  describe("Constraints", () => {
+    it("Non-authority cannot initialize lending vault", async () => {
+      const rogue = Keypair.generate();
+      const sig = await provider.connection.requestAirdrop(rogue.publicKey, 2 * LAMPORTS_PER_SOL);
+      await provider.connection.confirmTransaction(sig);
+
+      try {
+        await program.methods
+          .initializeLendingVault()
+          .accountsStrict({
+            authority: rogue.publicKey,
+            config: configPda,
+            lendingVault: lendingVaultPda,
+            solVault: solVaultPda,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([rogue])
+          .rpc();
+
+        throw new Error("Should have failed");
+      } catch (e) {
+        expect(e.message).to.match(/Unauthorized|constraint|already in use/i);
+        console.log("Correctly rejected unauthorized vault init");
+      }
+    });
+
+    it("Cannot initialize lending vault twice", async () => {
+      try {
+        await program.methods
+          .initializeLendingVault()
+          .accountsStrict({
+            authority,
+            config: configPda,
+            lendingVault: lendingVaultPda,
+            solVault: solVaultPda,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+
+        throw new Error("Should have failed");
+      } catch (e) {
+        expect(e.message).to.match(/already in use|already initialized/i);
+        console.log("Correctly rejected double initialization");
+      }
+    });
+
+    it("Cannot withdraw without a position", async () => {
+      const noPosition = Keypair.generate();
+      const sig = await provider.connection.requestAirdrop(noPosition.publicKey, 2 * LAMPORTS_PER_SOL);
+      await provider.connection.confirmTransaction(sig);
+
+      const [lpPositionPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("lp_position"), noPosition.publicKey.toBuffer()],
+        program.programId
+      );
+
+      try {
+        await program.methods
+          .withdraw()
+          .accountsStrict({
+            signer: noPosition.publicKey,
+            lpPosition: lpPositionPda,
+            lendingVault: lendingVaultPda,
+            solVault: solVaultPda,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([noPosition])
+          .rpc();
+
+        throw new Error("Should have failed");
+      } catch (e) {
+        expect(e.message).to.match(/Account does not exist|not found|AccountNotInitialized/i);
+        console.log("Correctly rejected withdraw with no position");
+      }
+    });
+  });
+
+  describe("Withdraw", () => {
+    it("LP withdraws and receives SOL back", async () => {
+      const [lpPositionPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("lp_position"), lp.publicKey.toBuffer()],
+        program.programId
+      );
+
+      const positionBefore = await program.account.lpPosition.fetch(lpPositionPda);
+      const lpBalanceBefore = await provider.connection.getBalance(lp.publicKey);
+      const solVaultBefore = await provider.connection.getBalance(solVaultPda);
+      const vaultStateBefore = await program.account.lendingVault.fetch(lendingVaultPda);
+
+      await program.methods
+        .withdraw()
+        .accountsStrict({
+          signer: lp.publicKey,
+          lpPosition: lpPositionPda,
+          lendingVault: lendingVaultPda,
+          solVault: solVaultPda,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([lp])
+        .rpc();
+
+      // LP position should be closed
+      try {
+        await program.account.lpPosition.fetch(lpPositionPda);
+        throw new Error("LP position should have been closed");
+      } catch (e) {
+        expect(e.message).to.match(/Account does not exist|not found/i);
+      }
+
+      // LP balance should have increased by supplied amount (+ rent from closed account)
+      const lpBalanceAfter = await provider.connection.getBalance(lp.publicKey);
+      expect(lpBalanceAfter).to.be.greaterThan(lpBalanceBefore);
+
+      // Sol vault balance should have decreased
+      const solVaultAfter = await provider.connection.getBalance(solVaultPda);
+      expect(solVaultBefore - solVaultAfter).to.equal(positionBefore.suppliedAmount.toNumber());
+
+      // total_supplied should have decreased by principal
+      const vaultStateAfter = await program.account.lendingVault.fetch(lendingVaultPda);
+      expect(vaultStateAfter.totalSupplied.toNumber()).to.equal(
+        vaultStateBefore.totalSupplied.toNumber() - positionBefore.suppliedAmount.toNumber()
+      );
+
+      console.log("LP withdrew:", positionBefore.suppliedAmount.toNumber() / LAMPORTS_PER_SOL, "SOL");
+      console.log("LP balance after:", lpBalanceAfter / LAMPORTS_PER_SOL, "SOL");
+      console.log("SOL vault after:", solVaultAfter / LAMPORTS_PER_SOL, "SOL");
+    });
+
+    it("Cannot withdraw someone else's position", async () => {
+      const [lp2PositionPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("lp_position"), lp2.publicKey.toBuffer()],
+        program.programId
+      );
+
+      try {
+        await program.methods
+          .withdraw()
+          .accountsStrict({
+            signer: lp.publicKey,
+            lpPosition: lp2PositionPda,
+            lendingVault: lendingVaultPda,
+            solVault: solVaultPda,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([lp])
+          .rpc();
+
+        throw new Error("Should have failed");
+      } catch (e) {
+        expect(e.message).to.match(/InvalidOwner|constraint|seeds/i);
+        console.log("Correctly rejected unauthorized withdrawal");
+      }
     });
   });
 });

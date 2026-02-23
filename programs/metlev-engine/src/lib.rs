@@ -62,6 +62,12 @@ pub mod metlev_engine {
     ) -> Result<()> {
         ctx.accounts.supply(&ctx.bumps, amount)
     }
+
+    pub fn withdraw(
+        ctx: Context<Withdraw>,
+    ) -> Result<()> {
+        ctx.accounts.withdraw()
+    }
     pub fn open_position(
         ctx: Context<OpenPosition>,
         leverage: u64,

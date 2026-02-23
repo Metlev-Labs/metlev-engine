@@ -371,7 +371,6 @@ describe("metlev-engine", () => {
             mint: USDC_MINT, // Wrong mint!
             collateralConfig: solCollateralConfigPda, // SOL config
             vault: wrongVaultPda,
-            userTokenAccount: anotherUser.publicKey, // Not used
             position: wrongPositionPda,
             systemProgram: SystemProgram.programId,
             tokenProgram: TOKEN_PROGRAM_ID,
@@ -451,6 +450,189 @@ describe("metlev-engine", () => {
 
       const config = await program.account.config.fetch(configPda);
       expect(config.paused).to.equal(false);
+    });
+  });
+
+  describe("Update Collateral Config", () => {
+    it("Authority can disable a collateral", async () => {
+      await program.methods
+        .updateCollateralEnabled(SOL_MINT, false)
+        .accountsStrict({
+          authority,
+          config: configPda,
+          collateralConfig: solCollateralConfigPda,
+        })
+        .rpc();
+
+      const config = await program.account.collateralConfig.fetch(solCollateralConfigPda);
+      expect(config.enabled).to.equal(false);
+    });
+
+    it("Authority can re-enable a collateral", async () => {
+      await program.methods
+        .updateCollateralEnabled(SOL_MINT, true)
+        .accountsStrict({
+          authority,
+          config: configPda,
+          collateralConfig: solCollateralConfigPda,
+        })
+        .rpc();
+
+      const config = await program.account.collateralConfig.fetch(solCollateralConfigPda);
+      expect(config.enabled).to.equal(true);
+    });
+
+    it("Authority can update LTV params", async () => {
+      await program.methods
+        .updateCollateralLtvParams(SOL_MINT, 7000, 8500)
+        .accountsStrict({
+          authority,
+          config: configPda,
+          collateralConfig: solCollateralConfigPda,
+        })
+        .rpc();
+
+      const config = await program.account.collateralConfig.fetch(solCollateralConfigPda);
+      expect(config.maxLtv).to.equal(7000);
+      expect(config.liquidationThreshold).to.equal(8500);
+
+      // Restore original values
+      await program.methods
+        .updateCollateralLtvParams(SOL_MINT, SOL_CONFIG.maxLtv, SOL_CONFIG.liquidationThreshold)
+        .accountsStrict({
+          authority,
+          config: configPda,
+          collateralConfig: solCollateralConfigPda,
+        })
+        .rpc();
+    });
+
+    it("Authority can update only one LTV param at a time", async () => {
+      await program.methods
+        .updateCollateralLtvParams(SOL_MINT, null, 8200)
+        .accountsStrict({
+          authority,
+          config: configPda,
+          collateralConfig: solCollateralConfigPda,
+        })
+        .rpc();
+
+      const config = await program.account.collateralConfig.fetch(solCollateralConfigPda);
+      expect(config.maxLtv).to.equal(SOL_CONFIG.maxLtv); // unchanged
+      expect(config.liquidationThreshold).to.equal(8200);
+
+      // Restore
+      await program.methods
+        .updateCollateralLtvParams(SOL_MINT, null, SOL_CONFIG.liquidationThreshold)
+        .accountsStrict({
+          authority,
+          config: configPda,
+          collateralConfig: solCollateralConfigPda,
+        })
+        .rpc();
+    });
+
+    it("Authority can update liquidation penalty", async () => {
+      await program.methods
+        .updateCollateralLiquidationPenalty(SOL_MINT, 700)
+        .accountsStrict({
+          authority,
+          config: configPda,
+          collateralConfig: solCollateralConfigPda,
+        })
+        .rpc();
+
+      const config = await program.account.collateralConfig.fetch(solCollateralConfigPda);
+      expect(config.liquidationPenalty).to.equal(700);
+
+      // Restore
+      await program.methods
+        .updateCollateralLiquidationPenalty(SOL_MINT, SOL_CONFIG.liquidationPenalty)
+        .accountsStrict({
+          authority,
+          config: configPda,
+          collateralConfig: solCollateralConfigPda,
+        })
+        .rpc();
+    });
+
+    it("Authority can update min deposit", async () => {
+      const newMin = new anchor.BN(0.2 * LAMPORTS_PER_SOL);
+
+      await program.methods
+        .updateCollateralMinDeposit(SOL_MINT, newMin)
+        .accountsStrict({
+          authority,
+          config: configPda,
+          collateralConfig: solCollateralConfigPda,
+        })
+        .rpc();
+
+      const config = await program.account.collateralConfig.fetch(solCollateralConfigPda);
+      expect(config.minDeposit.toNumber()).to.equal(newMin.toNumber());
+
+      // Restore
+      await program.methods
+        .updateCollateralMinDeposit(SOL_MINT, new anchor.BN(SOL_CONFIG.minDeposit))
+        .accountsStrict({
+          authority,
+          config: configPda,
+          collateralConfig: solCollateralConfigPda,
+        })
+        .rpc();
+    });
+
+    it("Fails when LTV params violate threshold invariant", async () => {
+      try {
+        // max_ltv (8500) >= liquidation_threshold (8000) — invalid
+        await program.methods
+          .updateCollateralLtvParams(SOL_MINT, 8500, 8000)
+          .accountsStrict({
+            authority,
+            config: configPda,
+            collateralConfig: solCollateralConfigPda,
+          })
+          .rpc();
+
+        assert.fail("Should have failed with InvalidLiquidationThreshold");
+      } catch (error) {
+        expect(error.message).to.include("InvalidLiquidationThreshold");
+      }
+    });
+
+    it("Fails when liquidation penalty exceeds 20%", async () => {
+      try {
+        await program.methods
+          .updateCollateralLiquidationPenalty(SOL_MINT, 2001) // 20.01%
+          .accountsStrict({
+            authority,
+            config: configPda,
+            collateralConfig: solCollateralConfigPda,
+          })
+          .rpc();
+
+        assert.fail("Should have failed with InvalidAmount");
+      } catch (error) {
+        expect(error.message).to.include("InvalidAmount");
+      }
+    });
+
+    it("Non-authority cannot update collateral config", async () => {
+      try {
+        await program.methods
+          .updateCollateralEnabled(SOL_MINT, false)
+          .accountsStrict({
+            authority: user.publicKey,
+            config: configPda,
+            collateralConfig: solCollateralConfigPda,
+          })
+          .signers([user])
+          .rpc();
+
+        assert.fail("Should have failed with Unauthorized");
+      } catch (error) {
+        expect(error.message).to.include("Unauthorized");
+      }
     });
   });
 

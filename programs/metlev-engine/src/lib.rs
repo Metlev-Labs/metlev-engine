@@ -17,6 +17,10 @@ pub mod metlev_engine {
         ctx.accounts.initialize(&ctx.bumps)
     }
 
+    pub fn initialize_lending_vault(ctx: Context<InitializeLendingVault>) -> Result<()> {
+        ctx.accounts.initialize_lending_vault(&ctx.bumps)
+    }
+
     pub fn register_collateral(
         ctx: Context<RegisterCollateral>,
         oracle: Pubkey,

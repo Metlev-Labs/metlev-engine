@@ -38,17 +38,38 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Cache Solana CLI
+        uses: actions/cache@v4
+        id: cache-solana
+        with:
+          path: ~/.local/share/solana/install
+          key: solana-v3.1.6
+
       - name: Install Solana CLI
-        run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.6/install)"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+        if: steps.cache-solana.outputs.cache-hit != 'true'
+        run: sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.6/install)"
+
+      - name: Add Solana to PATH
+        run: echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Cache Anchor CLI
+        uses: actions/cache@v4
+        id: cache-anchor
+        with:
+          path: |
+            ~/.avm
+            ~/.cargo/bin/avm
+          key: anchor-0.32.1
 
       - name: Install Anchor CLI
+        if: steps.cache-anchor.outputs.cache-hit != 'true'
         run: |
           cargo install --git https://github.com/coral-xyz/anchor avm --force
           avm install 0.32.1
           avm use 0.32.1
-          echo "$HOME/.avm/bin" >> $GITHUB_PATH
+
+      - name: Add Anchor to PATH
+        run: echo "$HOME/.avm/bin" >> $GITHUB_PATH
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

@@ -49,26 +49,31 @@ This protocol uses a **per-collateral configuration pattern** (similar to Aave, 
 programs/
 └── metlev-engine/
     └── src/
-        ├── lib.rs                      # Program entry point
+        ├── lib.rs                           # Program entry point
         ├── state/
-        │   ├── mod.rs                  # State module exports
-        │   ├── config.rs               # Global protocol configuration
-        │   ├── position.rs             # User position state
-        │   └── lending_vault.rs        # Mock lending vault (POC)
+        │   ├── mod.rs                       # State module exports
+        │   ├── config.rs                    # Global protocol configuration
+        │   ├── position.rs                  # User leveraged position state
+        │   ├── lending_vault.rs             # Lending vault state and accounting
+        │   └── lp_position.rs               # LP supplier position and interest
         ├── instructions/
-        │   ├── mod.rs                  # Instruction exports
-        │   ├── initialize.rs           # Initialize protocol config
+        │   ├── mod.rs                       # Instruction exports
+        │   ├── initialize.rs                # Initialize protocol config
         │   ├── register_collateral.rs       # Register new collateral type
-        │   ├── deposit_collateral.rs   # Deposit SOL/USDC/other tokens
-        │   ├── open_position.rs        # Create leveraged DLMM position
-        │   ├── close_position.rs       # Close position and repay debt
-        │   ├── liquidate.rs            # Force-close unhealthy positions
-        │   └── update_config.rs        # Update protocol/collateral parameters
+        │   ├── deposit_sol_collateral.rs    # Deposit SOL as collateral
+        │   ├── deposit_token_collateral.rs  # Deposit SPL tokens as collateral
+        │   ├── initialize_lending_vault.rs  # Create and seed the lending vault
+        │   ├── supply.rs                    # LP supplies SOL to the vault
+        │   ├── withdraw.rs                  # LP withdraws SOL + interest
+        │   ├── open_position.rs             # Create leveraged DLMM position
+        │   ├── close_position.rs            # Close position and repay debt
+        │   ├── liquidate.rs                 # Force-close unhealthy positions
+        │   └── update_config.rs             # Update protocol/collateral parameters
         ├── utils/
-        │   ├── mod.rs                  # Utility exports
-        │   ├── health.rs               # Health factor calculations
-        │   └── oracle.rs               # Price oracle helpers
-        └── errors.rs                   # Custom error definitions
+        │   ├── mod.rs                       # Utility exports
+        │   ├── health.rs                    # Health factor calculations
+        │   └── oracle.rs                    # Price oracle helpers
+        └── errors.rs                        # Custom error definitions
 ```
 
 ### State Accounts
@@ -122,18 +127,36 @@ pub struct Position {
 - Users can have multiple positions with different collateral types
 - Each position is isolated per collateral mint
 
-**Lending Vault (Mock Lender - POC)**
+**LendingVault (On-Chain SOL Vault)**
 ```rust
 pub struct LendingVault {
-    pub total_supplied: u64,
-    pub total_borrowed: u64,
-    pub interest_rate_bps: u16,
+    pub total_supplied: u64,    // Total SOL supplied by LPs
+    pub total_borrowed: u64,    // Total SOL currently borrowed
+    pub interest_rate_bps: u16, // Annual interest rate in basis points
+    pub bump: u8,               // LendingVault PDA bump
+    pub vault_bump: u8,         // sol_vault PDA bump (for CPI signing)
+}
+```
+- PDA: `["lending_vault"]`
+- Paired with a `sol_vault` SystemAccount PDA that holds the actual lamports
+- `sol_vault` PDA: `["sol_vault", lending_vault]`
+- Seeded with rent-exempt minimum on initialization
+- Tracks total supplied and borrowed for utilization calculations
+
+**LpPosition (Per-LP Supplier State)**
+```rust
+pub struct LpPosition {
+    pub lp: Pubkey,             // Supplier wallet
+    pub supplied_amount: u64,   // Principal supplied
+    pub interest_earned: u64,   // Accrued interest
+    pub last_update: i64,       // Unix timestamp of last interest accrual
     pub bump: u8,
 }
 ```
-- Simple mock vault for POC
-- Tracks available liquidity for borrowing
-- Will integrate with real lenders post-POC
+- PDA: `["lp_position", lp, lending_vault]`
+- Created via `init_if_needed` to support top-up deposits
+- Interest accrues using simple interest: `principal * rate_bps * elapsed / (365 * 24 * 3600 * 10000)`
+- Closed (rent returned) on full withdrawal
 
 ## Implementation Steps
 
@@ -260,16 +283,16 @@ pyth-solana-receiver-sdk = "0.2.0"  # Oracle integration
 ## Getting Started
 
 ### Prerequisites
-- Rust 1.75+
-- Solana CLI 1.18+
+- Rust 1.89.0
+- Solana CLI 3.1.6
 - Anchor 0.32.1
-- Node.js 18+
+- Node.js 20+
 - Yarn
 
 ### Installation
 
 ```bash
-# Install dependencies
+# Install dependencies (also sets up git hooks)
 yarn install
 
 # Build the program
@@ -278,6 +301,20 @@ anchor build
 # Run tests
 anchor test
 ```
+
+### Branch Naming Convention
+
+This repo enforces branch naming via a git pre-push hook and CI check. Branches must follow:
+
+```
+feat/<name>      # New feature
+fix/<name>       # Bug fix
+chore/<name>     # Maintenance
+docs/<name>      # Documentation
+refactor/<name>  # Code refactoring
+```
+
+The hook is automatically configured when you run `yarn install`.
 
 ## Testing Strategy
 
@@ -323,17 +360,32 @@ anchor test
 - [Anchor Framework](https://www.anchor-lang.com/)
 - [Turbin3 Program](https://www.turbin3.org/)
 
+## CI/CD
+
+Tests run automatically via GitHub Actions on push to `main`, `feat/**`, `fix/**` and on pull requests to `main`.
+
+The pipeline:
+1. Validates branch naming convention
+2. Builds with Rust 1.89.0 (Rust deps cached)
+3. Installs Solana CLI 3.1.6 (cached after first run)
+4. Installs Anchor CLI 0.32.1 (cached after first run)
+5. Installs Node dependencies (yarn cache)
+6. Runs `anchor build` + `anchor test`
+
 ## Project Status
 
 🚧 **In Development** - POC Phase
 
 - [x] Project planning and requirements
-- [] Project skeleton and base structure
-- [] Core state accounts (Config, CollateralConfig, Position, LendingVault)
-- [] Base instruction implementations (initialize, register_collateral, deposit, etc.)
-- [] Comprehensive test suite
-- [ ] Token transfers and vault management
+- [x] Project skeleton and base structure
+- [x] Core state accounts (Config, Position, LendingVault, LpPosition)
+- [x] Base instructions (initialize, register_collateral, deposit_collateral)
+- [x] Lending vault (initialize_lending_vault, supply, withdraw with interest accrual)
+- [x] Lending vault test suite with constraint validation
+- [x] CI/CD pipeline (GitHub Actions) with Solana/Anchor/Rust caching
+- [x] Branch naming enforcement (git hook + CI check)
 - [ ] Position opening (Meteora DLMM integration via CPI)
 - [ ] Health monitoring (oracle integration)
 - [ ] Liquidation system
+- [ ] Dynamic APY based on vault utilization (kink rate model)
 - [ ] Full integration testing and deployment

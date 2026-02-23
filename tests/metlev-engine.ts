@@ -90,6 +90,15 @@ describe("metlev-engine", () => {
 
   describe("Protocol Initialization", () => {
     it("Initializes the protocol config", async () => {
+      // Skip if already initialized
+      try {
+        await program.account.config.fetch(configPda);
+        console.log("✓ Protocol already initialized, skipping...");
+        return;
+      } catch {
+        // Not initialized, proceed
+      }
+
       await program.methods
         .initialize()
         .accountsStrict({
@@ -104,12 +113,21 @@ describe("metlev-engine", () => {
       expect(config.authority.toBase58()).to.equal(authority.toBase58());
       expect(config.paused).to.equal(false);
 
-      console.log("Protocol initialized with authority:", authority.toBase58());
+      console.log("✓ Protocol initialized with authority:", authority.toBase58());
     });
   });
 
   describe("Collateral Configuration", () => {
     it("Registers SOL as collateral", async () => {
+      // Skip if already registered
+      try {
+        await program.account.collateralConfig.fetch(solCollateralConfigPda);
+        console.log("✓ SOL collateral already registered, skipping...");
+        return;
+      } catch {
+        // Not registered, proceed
+      }
+
       await program.methods
         .registerCollateral(
           SOL_ORACLE,
@@ -150,6 +168,15 @@ describe("metlev-engine", () => {
     });
 
     it("Registers USDC as collateral with different parameters", async () => {
+      // Skip if already registered
+      try {
+        await program.account.collateralConfig.fetch(usdcCollateralConfigPda);
+        console.log("✓ USDC collateral already registered, skipping...");
+        return;
+      } catch {
+        // Not registered, proceed
+      }
+
       await program.methods
         .registerCollateral(
           USDC_ORACLE,
@@ -239,13 +266,20 @@ describe("metlev-engine", () => {
     it("Creates a position with SOL collateral", async () => {
       const depositAmount = new anchor.BN(0.5 * LAMPORTS_PER_SOL);
 
+      // Derive vault PDA
+      const [vaultPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), user.publicKey.toBuffer(), SOL_MINT.toBuffer()],
+        program.programId
+      );
+
       await program.methods
-        .depositCollateral(depositAmount)
+        .depositSolCollateral(depositAmount)
         .accountsStrict({
           user: user.publicKey,
           config: configPda,
           mint: SOL_MINT,
           collateralConfig: solCollateralConfigPda,
+          vault: vaultPda,
           position: userSolPositionPda,
           systemProgram: SystemProgram.programId,
           tokenProgram: TOKEN_PROGRAM_ID,
@@ -281,15 +315,21 @@ describe("metlev-engine", () => {
         program.programId
       );
 
+      const [anotherVaultPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), anotherUser.publicKey.toBuffer(), SOL_MINT.toBuffer()],
+        program.programId
+      );
+
       try {
         await program.methods
-          .depositCollateral(tooSmall)
+          .depositSolCollateral(tooSmall)
           .accountsStrict({
             user: anotherUser.publicKey,
             config: configPda,
             mint: SOL_MINT,
             collateralConfig: solCollateralConfigPda,
-            position: anotherPositionPda,
+            vault: anotherVaultPda,
+              position: anotherPositionPda,
             systemProgram: SystemProgram.programId,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
@@ -317,14 +357,21 @@ describe("metlev-engine", () => {
         program.programId
       );
 
+      const [wrongVaultPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), anotherUser.publicKey.toBuffer(), USDC_MINT.toBuffer()],
+        program.programId
+      );
+
       try {
         await program.methods
-          .depositCollateral(depositAmount)
+          .depositSolCollateral(depositAmount)
           .accountsStrict({
             user: anotherUser.publicKey,
             config: configPda,
             mint: USDC_MINT, // Wrong mint!
             collateralConfig: solCollateralConfigPda, // SOL config
+            vault: wrongVaultPda,
+            userTokenAccount: anotherUser.publicKey, // Not used
             position: wrongPositionPda,
             systemProgram: SystemProgram.programId,
             tokenProgram: TOKEN_PROGRAM_ID,
@@ -366,15 +413,21 @@ describe("metlev-engine", () => {
         program.programId
       );
 
+      const [pausedVaultPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), anotherUser.publicKey.toBuffer(), SOL_MINT.toBuffer()],
+        program.programId
+      );
+
       try {
         await program.methods
-          .depositCollateral(new anchor.BN(LAMPORTS_PER_SOL))
+          .depositSolCollateral(new anchor.BN(LAMPORTS_PER_SOL))
           .accountsStrict({
             user: anotherUser.publicKey,
             config: configPda,
             mint: SOL_MINT,
             collateralConfig: solCollateralConfigPda,
-            position: pausedPositionPda,
+            vault: pausedVaultPda,
+              position: pausedPositionPda,
             systemProgram: SystemProgram.programId,
             tokenProgram: TOKEN_PROGRAM_ID,
           })

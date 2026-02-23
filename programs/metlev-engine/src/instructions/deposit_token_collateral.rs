@@ -1,10 +1,10 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{Mint, TokenInterface};
+use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
 use crate::state::{Config, CollateralConfig, Position, PositionStatus};
 use crate::errors::ProtocolError;
 
 #[derive(Accounts)]
-pub struct DepositCollateral<'info> {
+pub struct DepositTokenCollateral<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
 
@@ -15,7 +15,8 @@ pub struct DepositCollateral<'info> {
     pub config: Account<'info, Config>,
 
     #[account(
-        mint::token_program = token_program
+        mint::token_program = token_program,
+        constraint = mint.key() != anchor_spl::token::spl_token::native_mint::id() @ ProtocolError::InvalidCollateralType,
     )]
     pub mint: InterfaceAccount<'info, Mint>,
 
@@ -23,8 +24,22 @@ pub struct DepositCollateral<'info> {
         seeds = [CollateralConfig::SEED_PREFIX, mint.key().as_ref()],
         bump = collateral_config.bump,
         constraint = collateral_config.mint == mint.key() @ ProtocolError::InvalidCollateralType,
+        constraint = collateral_config.enabled @ ProtocolError::InvalidCollateralType,
     )]
     pub collateral_config: Account<'info, CollateralConfig>,
+
+    #[account(
+        init_if_needed,
+        payer = user,
+        token::mint = mint,
+        token::authority = vault,
+        seeds = [b"vault", user.key().as_ref(), mint.key().as_ref()],
+        bump,
+    )]
+    pub vault: InterfaceAccount<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub user_token_account: InterfaceAccount<'info, TokenAccount>,
 
     #[account(
         init,
@@ -39,17 +54,13 @@ pub struct DepositCollateral<'info> {
     pub token_program: Interface<'info, TokenInterface>,
 }
 
-impl<'info> DepositCollateral<'info> {
+impl<'info> DepositTokenCollateral<'info> {
     pub fn deposit(
         &mut self,
-        bumps: &DepositCollateralBumps,
+        bumps: &DepositTokenCollateralBumps,
         amount: u64,
     ) -> Result<()> {
         require!(!self.config.paused, ProtocolError::ProtocolPaused);
-        require!(
-            self.collateral_config.is_enabled(),
-            ProtocolError::InvalidCollateralType
-        );
 
         require!(
             amount >= self.collateral_config.min_deposit,
@@ -61,15 +72,25 @@ impl<'info> DepositCollateral<'info> {
             collateral_mint: self.collateral_config.mint,
             collateral_amount: amount,
             debt_amount: 0,
-            meteora_position: Pubkey::default(), // Will be set when opening position
+            meteora_position: Pubkey::default(),
             created_at: Clock::get()?.unix_timestamp,
             status: PositionStatus::Active,
             bump: bumps.position,
         });
 
-        // TODO: Transfer collateral to vault
-        // For SOL: system_program transfer
-        // For tokens: token_program transfer
+        let transfer_accounts = TransferChecked {
+            from: self.user_token_account.to_account_info(),
+            mint: self.mint.to_account_info(),
+            to: self.vault.to_account_info(),
+            authority: self.user.to_account_info(),
+        };
+
+        let cpi_ctx = CpiContext::new(
+            self.token_program.to_account_info(),
+            transfer_accounts,
+        );
+
+        token_interface::transfer_checked(cpi_ctx, amount, self.mint.decimals)?;
 
         Ok(())
     }

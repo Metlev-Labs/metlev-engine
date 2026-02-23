@@ -16,6 +16,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Check branch naming convention
+        if: github.event_name == 'push'
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          if [[ "$BRANCH" != "main" && ! "$BRANCH" =~ ^(feat|fix|chore|docs|refactor)/.+ ]]; then
+            echo "Branch '$BRANCH' does not follow naming convention."
+            echo "Required format: feat/<name>, fix/<name>, chore/<name>, docs/<name>, refactor/<name>"
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
 

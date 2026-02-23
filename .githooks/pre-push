@@ -1,0 +1,16 @@
+#!/bin/sh
+
+BRANCH=$(git symbolic-ref --short HEAD)
+PATTERN="^(main|feat|fix|chore|docs|refactor)/.+"
+
+if [ "$BRANCH" = "main" ]; then
+  exit 0
+fi
+
+if ! echo "$BRANCH" | grep -qE "$PATTERN"; then
+  echo "ERROR: Branch '$BRANCH' does not follow naming convention."
+  echo "Required format: feat/<name>, fix/<name>, chore/<name>, docs/<name>, refactor/<name>"
+  echo ""
+  echo "Rename with: git branch -m $BRANCH feat/<your-name>"
+  exit 1
+fi

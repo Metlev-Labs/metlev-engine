@@ -1,6 +1,7 @@
 {
   "license": "ISC",
   "scripts": {
+    "prepare": "git config core.hooksPath .githooks && chmod +x .githooks/pre-push",
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
   },

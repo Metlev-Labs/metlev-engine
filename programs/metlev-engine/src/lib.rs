@@ -122,4 +122,18 @@ pub mod metlev_engine {
     ) -> Result<()> {
         ctx.accounts.update_min_deposit(min_deposit)
     }
+
+    pub fn initialize_mock_oracle(
+        ctx: Context<InitializeMockOracle>,
+        price: u64,
+    ) -> Result<()> {
+        ctx.accounts.initialize_mock_oracle(&ctx.bumps, price)
+    }
+
+    pub fn update_mock_oracle(
+        ctx: Context<UpdateMockOracle>,
+        price: u64,
+    ) -> Result<()> {
+        ctx.accounts.update_mock_oracle(price)
+    }
 }

@@ -63,6 +63,7 @@ impl<'info> RegisterCollateral<'info> {
             min_deposit,
             interest_rate_bps,
             oracle_max_age,
+            decimals: self.mint.decimals,
             enabled: true,
             bump: bumps.collateral_config,
         });

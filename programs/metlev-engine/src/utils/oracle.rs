@@ -32,11 +32,12 @@ pub fn validate_oracle_price(
 
 /// Mock oracle price reader (for POC testing)
 /// In production, this would integrate with Pyth, Switchboard, etc.
-pub fn read_oracle_price<'a>(
-    oracle_account: &'a AccountInfo<'a>,
+pub fn read_oracle_price(
+    oracle_account: &AccountInfo,
     max_age: u64,
 ) -> Result<(u64, i64)> {
-    let mock: Account<MockOracle> = Account::try_from(oracle_account)?;
+    let data = oracle_account.try_borrow_data()?;
+    let mock = MockOracle::try_deserialize(&mut data.as_ref())?;
     require!(
         !is_oracle_stale(mock.timestamp, max_age),
         ProtocolError::OracleStale

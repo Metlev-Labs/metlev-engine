@@ -43,6 +43,9 @@ pub struct CollateralConfig {
     /// Maximum oracle staleness in seconds
     pub oracle_max_age: u64,
 
+    /// Token decimals (e.g., 9 for SOL, 6 for USDC)
+    pub decimals: u8,
+
     /// Whether this collateral is enabled
     pub enabled: bool,
 

@@ -1,6 +1,7 @@
 use anchor_lang::prelude::*;
-use crate::state::{Config, Position, LendingVault};
+use crate::state::{Config, Position, LendingVault, CollateralConfig};
 use crate::errors::ProtocolError;
+use crate::utils::{read_oracle_price, calculate_collateral_value, calculate_ltv};
 
 #[derive(Accounts)]
 pub struct Liquidate<'info> {
@@ -28,6 +29,18 @@ pub struct Liquidate<'info> {
     )]
     pub lending_vault: Account<'info, LendingVault>,
 
+    #[account(
+        seeds = [CollateralConfig::SEED_PREFIX, position.collateral_mint.as_ref()],
+        bump = collateral_config.bump,
+    )]
+    pub collateral_config: Account<'info, CollateralConfig>,
+
+    /// CHECK: verified via collateral_config.oracle constraint
+    #[account(
+        constraint = price_oracle.key() == collateral_config.oracle @ ProtocolError::OraclePriceUnavailable,
+    )]
+    pub price_oracle: UncheckedAccount<'info>,
+
     /// CHECK: Position owner to receive remaining collateral (if any)
     #[account(mut)]
     pub position_owner: UncheckedAccount<'info>,
@@ -36,29 +49,32 @@ pub struct Liquidate<'info> {
     /// CHECK: Meteora program
     pub meteora_program: UncheckedAccount<'info>,
 
-    /// TODO: Add oracle accounts for price feeds
-    /// CHECK: Price oracle
-    pub price_oracle: UncheckedAccount<'info>,
-
     pub system_program: Program<'info, System>,
 }
 
 impl<'info> Liquidate<'info> {
     pub fn liquidate(&mut self) -> Result<()> {
-        // TODO: Read oracle prices
-        // let sol_price = read_oracle_price(&self.price_oracle)?;
-        // require!(!is_oracle_stale(oracle_timestamp), ProtocolError::OracleStale);
+        let oracle_info = self.price_oracle.to_account_info();
+        let (price, _) = read_oracle_price(
+            &oracle_info,
+            self.collateral_config.oracle_max_age,
+        )?;
 
-        // TODO: Calculate position health
-        // let collateral_value = calculate_collateral_value(position, oracle);
-        // let debt_value = position.debt_amount;
-        // let ltv = calculate_ltv(collateral_value, debt_value);
-
-        // Check if position is liquidatable
-        // require!(
-        //     self.config.is_liquidatable(ltv),
-        //     ProtocolError::PositionHealthy
-        // );
+        let collateral_value = calculate_collateral_value(
+            self.position.collateral_amount,
+            price,
+            self.collateral_config.decimals,
+        )?;
+        let debt_value = calculate_collateral_value(
+            self.position.debt_amount,
+            price,
+            self.collateral_config.decimals,
+        )?;
+        let ltv = calculate_ltv(collateral_value, debt_value)?;
+        require!(
+            self.collateral_config.is_liquidatable(ltv),
+            ProtocolError::PositionHealthy
+        );
 
         // TODO: CPI to Meteora to remove liquidity
         // let total_proceeds = remove_liquidity_from_meteora();

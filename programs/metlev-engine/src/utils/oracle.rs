@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 use crate::errors::ProtocolError;
+use crate::state::{MockOracle};
 
 /// Check if oracle price data is stale
 pub fn is_oracle_stale(
@@ -31,16 +32,17 @@ pub fn validate_oracle_price(
 
 /// Mock oracle price reader (for POC testing)
 /// In production, this would integrate with Pyth, Switchboard, etc.
-pub fn read_mock_oracle_price(
-    _oracle_account: &AccountInfo,
+pub fn read_oracle_price(
+    oracle_account: &AccountInfo,
+    max_age: u64,
 ) -> Result<(u64, i64)> {
-    // TODO: Implement real oracle integration
-    // For now, return mock data:
-    // SOL price = $100 (with 6 decimals)
-    let price = 100_000_000;
-    let timestamp = Clock::get()?.unix_timestamp;
-
-    Ok((price, timestamp))
+    let data = oracle_account.try_borrow_data()?;
+    let mock = MockOracle::try_deserialize(&mut data.as_ref())?;
+    require!(
+        !is_oracle_stale(mock.timestamp, max_age),
+        ProtocolError::OracleStale
+    );
+    Ok((mock.price, mock.timestamp))
 }
 
 /// Price feed result

@@ -1,3 +1,4 @@
+pub mod mock;
 pub mod initialize;
 pub mod initialize_lending_vault;
 pub mod register_collateral;
@@ -10,6 +11,7 @@ pub mod update_config;
 pub mod supply;
 pub mod withdraw;
 
+pub use mock::*;
 pub use initialize::*;
 pub use initialize_lending_vault::*;
 pub use register_collateral::*;

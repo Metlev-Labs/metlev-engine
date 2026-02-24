@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 use anchor_lang::prelude::*;
 
 mod state;
@@ -8,6 +9,7 @@ mod utils;
 use instructions::*;
 
 declare_id!("3hiGnNihh2eACtAU3d45cT6unWgwtPLsqKUmZE5kYma3");
+declare_program!(dlmm);
 
 #[program]
 pub mod metlev_engine {

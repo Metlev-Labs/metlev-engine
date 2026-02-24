@@ -67,6 +67,7 @@ pub struct OpenPosition<'info> {
         constraint = price_oracle.key() == collateral_config.oracle @ ProtocolError::OraclePriceUnavailable,
     )]
     pub price_oracle: UncheckedAccount<'info>,
+    //Meteora CPI Accounts
 
      #[account(mut)]
     /// CHECK: The user's position account
@@ -144,6 +145,7 @@ impl<'info> OpenPosition<'info> {
             .ok_or(ProtocolError::MathOverflow)?;
 
         // Check if lending vault has enough liquidity
+        // check happens in the borrow fn
         self.lending_vault.borrow(borrow_amount)?;
 
         let oracle_info = self.price_oracle.to_account_info();
@@ -167,6 +169,10 @@ impl<'info> OpenPosition<'info> {
             self.collateral_config.validate_ltv(ltv),
             ProtocolError::ExceedsMaxLTV
         );
+    
+        //TODO:
+        //implement native transfer to WSOL token account
+        //token::native_sync
 
         // Update position debt
         self.position.debt_amount = borrow_amount;

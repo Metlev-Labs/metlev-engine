@@ -6,9 +6,12 @@ use anchor_lang::prelude::*;
 pub struct LendingVault {
     /// Vault authority (program PDA)
     pub authority: Pubkey,
-    pub total_supplied: u64,
-    pub total_borrowed: u64,
+    pub total_supplied_x: u64,
+    pub total_supplied_y:u64,
+    pub total_borrowed_x: u64,
+    pub total_borrowed_y: u64,
     /// Simple interest rate (basis points per year, 500 = 5%)
+    /// MVP:: interest rate same for both X & Y
     pub interest_rate_bps: u16,
     /// Last time interest was accrued
     pub last_update: i64,

@@ -12,8 +12,9 @@ pub struct LendingVault {
     pub interest_rate_bps: u16,
     /// Last time interest was accrued
     pub last_update: i64,
-    pub bump: u8,
     pub vault_bump: u8,
+    pub x_vault_bump: u8,
+    pub y_vault_bump: u8,
 }
 
 impl LendingVault {

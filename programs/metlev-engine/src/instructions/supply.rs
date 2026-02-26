@@ -1,12 +1,8 @@
-use anchor_lang::{
-    prelude::*,
-    system_program::{
-        transfer,
-        Transfer
-    }
+use anchor_lang::prelude::*;
+use anchor_spl::token_interface::{
+    transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
 };
-use crate::state::{LendingVault};
-use crate::state::LpPosition;
+use crate::state::{LendingVault, LpPosition};
 use crate::errors::ProtocolError;
 
 #[derive(Accounts)]
@@ -17,26 +13,39 @@ pub struct Supply<'info> {
     #[account(
         mut,
         seeds = [LendingVault::SEED_PREFIX],
-        bump = lending_vault.bump
+        bump = lending_vault.bump,
     )]
     pub lending_vault: Account<'info, LendingVault>,
 
+    #[account(address = anchor_spl::token::spl_token::native_mint::id())]
+    pub wsol_mint: InterfaceAccount<'info, Mint>,
+
     #[account(
         mut,
-        seeds = [b"sol_vault", lending_vault.key().as_ref()],
-        bump = lending_vault.vault_bump
+        seeds = [b"wsol_vault", lending_vault.key().as_ref()],
+        bump = lending_vault.vault_bump,
+        token::mint = wsol_mint,
+        token::authority = lending_vault,
     )]
-    pub sol_vault: SystemAccount<'info>,
+    pub wsol_vault: InterfaceAccount<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        token::mint = wsol_mint,
+        token::authority = signer,
+    )]
+    pub signer_wsol_ata: InterfaceAccount<'info, TokenAccount>,
 
     #[account(
         init_if_needed,
         payer = signer,
         space = LpPosition::DISCRIMINATOR.len() + LpPosition::INIT_SPACE,
-        seeds = [b"lp_position", signer.key().as_ref()],
+        seeds = [LpPosition::SEED_PREFIX, signer.key().as_ref()],
         bump,
     )]
     pub lp_position: Account<'info, LpPosition>,
 
+    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 
@@ -63,16 +72,13 @@ impl<'info> Supply<'info> {
             .checked_add(amount)
             .ok_or(ProtocolError::MathOverflow)?;
 
-        let accounts = Transfer {
-            from: self.signer.to_account_info(),
-            to: self.sol_vault.to_account_info()
+        let accounts = TransferChecked {
+            from: self.signer_wsol_ata.to_account_info(),
+            mint: self.wsol_mint.to_account_info(),
+            to: self.wsol_vault.to_account_info(),
+            authority: self.signer.to_account_info(),
         };
-
-        let ctx = CpiContext::new(
-            self.system_program.to_account_info(),
-            accounts,
-        );
-
-        transfer(ctx, amount)
+        let ctx = CpiContext::new(self.token_program.to_account_info(), accounts);
+        transfer_checked(ctx, amount, self.wsol_mint.decimals)
     }
 }

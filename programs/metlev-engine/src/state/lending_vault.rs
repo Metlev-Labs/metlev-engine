@@ -12,8 +12,8 @@ pub struct LendingVault {
     pub interest_rate_bps: u16,
     /// Last time interest was accrued
     pub last_update: i64,
-    pub bump: u8,
     pub vault_bump: u8,
+    pub token_vault_bump: u8,
 }
 
 impl LendingVault {
@@ -30,15 +30,22 @@ impl LendingVault {
     }
 
     pub fn borrow(&mut self, amount: u64) -> Result<()> {
-        require!(self.can_borrow(amount), crate::errors::ProtocolError::InsufficientLiquidity);
-        self.total_borrowed = self.total_borrowed.checked_add(amount)
+        require!(
+            self.can_borrow(amount),
+            crate::errors::ProtocolError::InsufficientLiquidity
+        );
+        self.total_borrowed = self
+            .total_borrowed
+            .checked_add(amount)
             .ok_or(crate::errors::ProtocolError::MathOverflow)?;
         Ok(())
     }
 
     /// Record debt repayment
     pub fn repay(&mut self, amount: u64) -> Result<()> {
-        self.total_borrowed = self.total_borrowed.checked_sub(amount)
+        self.total_borrowed = self
+            .total_borrowed
+            .checked_sub(amount)
             .ok_or(crate::errors::ProtocolError::MathOverflow)?;
         Ok(())
     }

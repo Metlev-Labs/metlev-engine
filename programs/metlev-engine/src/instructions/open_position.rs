@@ -26,7 +26,7 @@ pub struct OpenPosition<'info> {
     #[account(
         mut,
         seeds = [LendingVault::SEED_PREFIX],
-        bump = lending_vault.bump,
+        bump = lending_vault.vault_bump,
     )]
     pub lending_vault: Account<'info, LendingVault>,
 

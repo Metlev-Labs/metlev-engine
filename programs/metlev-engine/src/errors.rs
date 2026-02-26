@@ -29,6 +29,9 @@ pub enum ProtocolError {
     #[msg("Lending vault has insufficient liquidity")]
     InsufficientLiquidity,
 
+    #[msg("Error in provided Pubkeys")]
+    PubkeyMismatch,
+
     #[msg("Oracle price is stale or invalid")]
     OracleStale,
 

@@ -1,5 +1,5 @@
 use anchor_lang::{prelude::*, system_program::{Transfer, transfer}};
-
+use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 use crate::state::{LpPosition, LendingVault};
 use crate::errors::ProtocolError;
 
@@ -20,17 +20,23 @@ pub struct Withdraw<'info> {
     #[account(
         mut,
         seeds = [LendingVault::SEED_PREFIX],
-        bump = lending_vault.bump,
+        bump = lending_vault.vault_bump,
     )]
     pub lending_vault: Account<'info, LendingVault>,
 
     #[account(
         mut,
-        seeds = [b"sol_vault", lending_vault.key().as_ref()],
-        bump = lending_vault.vault_bump,
+        token::mint = mint_x,
+        token::authority = lending_vault,
+        token::token_program = token_program,
+        seeds = [b"token_vault"],
+        bump
     )]
-    pub sol_vault: SystemAccount<'info>,
-
+    pub token_vault: InterfaceAccount<'info, TokenAccount>,
+    
+    // mint_x = NATIVE_MINT for WSOL
+    pub mint_x: InterfaceAccount<'info, Mint>,
+    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 
 }
@@ -47,24 +53,26 @@ impl<'info> Withdraw<'info> {
         let amount = self.lp_position.claimable();
 
 
-        let rent_exempt = Rent::get()?.minimum_balance(0);
+        // let rent_exempt = Rent::get()?.minimum_balance(0);
+        //not sure whether it is safer to treat the WSOL as a token account and use token_vault.amount here
+        // as we have used the sync_native to sync the balances
         require!(
-            self.sol_vault.get_lamports() >= amount + rent_exempt,
+            // self.sol_vault.get_lamports() >= amount + rent_exempt,  
+            self.token_vault.amount >= amount,
             ProtocolError::InsufficientLiquidity
-        );
+        );      
 
         self.lending_vault.total_supplied =  self.lending_vault.total_supplied
             .checked_sub(self.lp_position.supplied_amount)
             .ok_or(ProtocolError::MathUnderflow)?;
 
         let accounts = Transfer{
-            from: self.sol_vault.to_account_info(),
+            from: self.token_vault.to_account_info(),
             to: self.signer.to_account_info()
         };
-        let lending_vault_key = self.lending_vault.key();
+
         let signer_seeds: &[&[&[u8]]] = &[&[
-            b"sol_vault",
-            lending_vault_key.as_ref(),
+            b"token_vault",
             &[self.lending_vault.vault_bump],
             ]
         ];

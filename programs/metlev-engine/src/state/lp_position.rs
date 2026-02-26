@@ -6,7 +6,7 @@ pub struct LpPosition {
     /// LP provider wallet
     pub lp: Pubkey,
 
-    /// Total SOL supplied (in lamports)
+    /// Total SOL/TOKEN supplied (in lamports)
     pub supplied_amount: u64,
 
     /// Accumulated interest earned so far (in lamports)
@@ -24,6 +24,7 @@ impl LpPosition {
 
     /// Accrue simple annual interest based on elapsed time and update state.
     /// interest = principal * rate_bps * elapsed_seconds / (365 * 24 * 3600 * 10000)
+    /// Interest Rate Same for Token_x and Token_Y
     pub fn accrue_interest(&mut self, interest_rate_bps: u16, current_time: i64) {
         let elapsed = (current_time - self.last_update).max(0) as u128;
         let interest = (self.supplied_amount as u128)

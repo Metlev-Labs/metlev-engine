@@ -1,7 +1,14 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { MetlevEngine } from "../target/types/metlev_engine";
-import { PublicKey, Keypair, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { PublicKey, Keypair, SystemProgram, LAMPORTS_PER_SOL, } from "@solana/web3.js";
+import {
+  TOKEN_PROGRAM_ID,
+  createMint,
+  createAccount,
+  mintTo,
+  getAccount,
+} from "@solana/spl-token";
 import { expect } from "chai";
 
 describe("Lending Vault", () => {
@@ -16,7 +23,12 @@ describe("Lending Vault", () => {
 
   let configPda: PublicKey;
   let lendingVaultPda: PublicKey;
-  let solVaultPda: PublicKey;
+  let tokenXVaultPda: PublicKey;
+  let tokenYVaultPda: PublicKey;
+
+  const SOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
+  let USDC_MINT: PublicKey;
+
 
   before(async () => {
     [configPda] = PublicKey.findProgramAddressSync(
@@ -29,10 +41,22 @@ describe("Lending Vault", () => {
       program.programId
     );
 
-    [solVaultPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("sol_vault"), lendingVaultPda.toBuffer()],
+    [tokenXVaultPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("token_x_vault")],
       program.programId
     );
+    [tokenYVaultPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("token_y_vault")],
+      program.programId
+    );
+
+    USDC_MINT = await createMint(
+          provider.connection,
+          provider.wallet.payer,
+          authority,
+          null,
+          6
+        );
 
     for (const user of [lp, lp2]) {
       const sig = await provider.connection.requestAirdrop(
@@ -66,7 +90,11 @@ describe("Lending Vault", () => {
           authority,
           config: configPda,
           lendingVault: lendingVaultPda,
-          solVault: solVaultPda,
+          tokenXVault: tokenXVaultPda,
+          tokenYVault: tokenYVaultPda,
+          mintX: SOL_MINT,
+          mintY: USDC_MINT,
+          tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
         .rpc();
@@ -75,7 +103,8 @@ describe("Lending Vault", () => {
 
     console.log("\n=== Setup Complete ===");
     console.log("Lending Vault PDA:", lendingVaultPda.toBase58());
-    console.log("SOL Vault PDA:", solVaultPda.toBase58());
+    console.log("WSOL Vault PDA:", tokenXVaultPda.toBase58());
+    console.log("USDC Vault PDA:", tokenYVaultPda.toBase58());
   });
 
   describe("Initialize Lending Vault", () => {
@@ -86,11 +115,7 @@ describe("Lending Vault", () => {
       expect(vault.totalSupplied.toNumber()).to.equal(0);
       expect(vault.totalBorrowed.toNumber()).to.equal(0);
 
-      const solVaultBalance = await provider.connection.getBalance(solVaultPda);
-      expect(solVaultBalance).to.be.greaterThan(0);
-
       console.log("Vault authority:", vault.authority.toBase58());
-      console.log("SOL vault balance (rent):", solVaultBalance, "lamports");
     });
   });
 

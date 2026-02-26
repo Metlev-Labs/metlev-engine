@@ -19,22 +19,14 @@ pub struct Supply<'info> {
     pub lending_vault: Account<'info, LendingVault>,
 
     #[account(
+        mut,
         token::mint = mint_x,
         token::authority = lending_vault,
         token::token_program = token_program,
         seeds = [b"token_x_vault"],
         bump
     )]
-    pub token_x_vault: InterfaceAccount<'info, TokenAccount>,
-
-    #[account(
-        token::mint = mint_y,
-        token::authority = lending_vault,
-        token::token_program = token_program,
-        seeds = [b"token_y_vault"],
-        bump
-    )]
-    pub token_y_vault: InterfaceAccount<'info, TokenAccount>,
+    pub token_vault: InterfaceAccount<'info, TokenAccount>,
 
     #[account(
         init_if_needed,
@@ -46,21 +38,17 @@ pub struct Supply<'info> {
     pub lp_position: Account<'info, LpPosition>,
     // mint_x = NATIVE_MINT for WSOL
     pub mint_x: InterfaceAccount<'info, Mint>,
-    pub mint_y: InterfaceAccount<'info, Mint>,
     ///Check: SPL token interface will check this
     pub user_x_ata: UncheckedAccount<'info>,
-    ///Check: SPL token interface will check this
-    pub user_y_ata: UncheckedAccount<'info>,
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 
 impl<'info> Supply<'info> {
-    pub fn supply(&mut self, bumps: &SupplyBumps, amount_x: u64, amount_y:u64) -> Result<()> {
+    pub fn supply(&mut self, bumps: &SupplyBumps, amount: u64) -> Result<()> {
         let current_time = Clock::get()?.unix_timestamp;
 
-        require_neq!(self.mint_x.key(), self.mint_y.key(), ProtocolError::PubkeyMismatch);
-        require!(!(self.mint_x.key()==Pubkey::default() && self.mint_x.key()==Pubkey::default()), ProtocolError::PubkeyMismatch);
+        require_neq!(self.mint_x.key(), Pubkey::default(), ProtocolError::PubkeyMismatch);
 
         if self.lp_position.lp == Pubkey::default() {
             self.lp_position.lp = self.signer.key();
@@ -73,40 +61,23 @@ impl<'info> Supply<'info> {
             );
         }
 
-        self.lp_position.supplied_amount_x = self.lp_position.supplied_amount_x
+        self.lp_position.supplied_amount = self.lp_position.supplied_amount
+            .checked_add(amount)
+            .ok_or(ProtocolError::MathOverflow)?;
+
+        self.lending_vault.total_supplied = self.lending_vault.total_supplied
             .checked_add(amount_x)
             .ok_or(ProtocolError::MathOverflow)?;
 
-        self.lp_position.supplied_amount_y = self.lp_position.supplied_amount_y
-            .checked_add(amount_y)
-            .ok_or(ProtocolError::MathOverflow)?;
-
-        self.lending_vault.total_supplied_x = self.lending_vault.total_supplied_x
-            .checked_add(amount_x)
-            .ok_or(ProtocolError::MathOverflow)?;
-        self.lending_vault.total_supplied_y = self.lending_vault.total_supplied_y
-            .checked_add(amount_y)
-            .ok_or(ProtocolError::MathOverflow)?;
-
-        let is_native_x =  self.mint_x.key() == NATIVE_MINT_ID;
-        let is_native_y = self.mint_y.key() == NATIVE_MINT_ID;
+        let is_native =  self.mint_x.key() == NATIVE_MINT_ID;
 
         // Transfer Logic for X
         self.handle_transfer(
-            is_native_x, 
-            amount_x, 
+            is_native, 
+            amount, 
             &self.user_x_ata.to_account_info(), 
-            &self.token_x_vault.to_account_info(), 
+            &self.token_vault.to_account_info(), 
             &self.mint_x
-        )?;
-
-        // Transfer Logic for Y
-        self.handle_transfer(
-            is_native_y, 
-            amount_y, 
-            &self.user_y_ata.to_account_info(), 
-            &self.token_y_vault.to_account_info(), 
-            &self.mint_y
         )?;
 
         Ok(())

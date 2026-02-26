@@ -26,30 +26,18 @@ pub struct InitializeLendingVault<'info>{
     pub lending_vault: Account<'info, LendingVault>,
 
     #[account(
-        init_if_needed,
+        init,
         payer = authority,
         token::mint = mint_x,
         token::authority = lending_vault,
         token::token_program = token_program,
-        seeds = [b"token_x_vault"],
+        seeds = [b"token_vault"],
         bump
     )]
-    pub token_x_vault: InterfaceAccount<'info, TokenAccount>,
-
-    #[account(
-        init_if_needed,
-        payer = authority,
-        token::mint = mint_y,
-        token::authority = lending_vault,
-        token::token_program = token_program,
-        seeds = [b"token_y_vault"],
-        bump
-    )]
-    pub token_y_vault: InterfaceAccount<'info, TokenAccount>,
+    pub token_vault: InterfaceAccount<'info, TokenAccount>,
 
     // mint_x = NATIVE_MINT for WSOL
     pub mint_x: InterfaceAccount<'info, Mint>,
-    pub mint_y: InterfaceAccount<'info, Mint>,
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
@@ -63,8 +51,7 @@ impl<'info> InitializeLendingVault<'info> {
             interest_rate_bps: 30, // Let's update that later to be dynamic
             last_update: Clock::get()?.unix_timestamp,
             vault_bump: bumps.lending_vault,
-            x_vault_bump:bumps.token_x_vault,
-            y_vault_bump:bumps.token_y_vault,
+            token_vault_bump: bumps.token_vault,    
         });
         Ok(())
     }

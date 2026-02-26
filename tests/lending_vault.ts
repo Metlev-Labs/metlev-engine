@@ -2,6 +2,12 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { MetlevEngine } from "../target/types/metlev_engine";
 import { PublicKey, Keypair, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import {
+  getOrCreateAssociatedTokenAccount,
+  createSyncNativeInstruction,
+  TOKEN_PROGRAM_ID,
+  NATIVE_MINT,
+} from "@solana/spl-token";
 import { expect } from "chai";
 
 describe("Lending Vault", () => {
@@ -16,7 +22,30 @@ describe("Lending Vault", () => {
 
   let configPda: PublicKey;
   let lendingVaultPda: PublicKey;
-  let solVaultPda: PublicKey;
+  let wsolVaultPda: PublicKey;
+  let lpWsolAta: PublicKey;
+  let lp2WsolAta: PublicKey;
+
+  async function wrapSol(user: Keypair, lamports: number): Promise<PublicKey> {
+    const ata = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      provider.wallet.payer,
+      NATIVE_MINT,
+      user.publicKey
+    );
+
+    const tx = new anchor.web3.Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: user.publicKey,
+        toPubkey: ata.address,
+        lamports,
+      }),
+      createSyncNativeInstruction(ata.address)
+    );
+
+    await provider.sendAndConfirm(tx, [user]);
+    return ata.address;
+  }
 
   before(async () => {
     [configPda] = PublicKey.findProgramAddressSync(
@@ -29,18 +58,19 @@ describe("Lending Vault", () => {
       program.programId
     );
 
-    [solVaultPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("sol_vault"), lendingVaultPda.toBuffer()],
+    [wsolVaultPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("wsol_vault"), lendingVaultPda.toBuffer()],
       program.programId
     );
 
+    // Airdrop SOL then wrap half of it into WSOL for each LP
     for (const user of [lp, lp2]) {
-      const sig = await provider.connection.requestAirdrop(
-        user.publicKey,
-        10 * LAMPORTS_PER_SOL
-      );
+      const sig = await provider.connection.requestAirdrop(user.publicKey, 10 * LAMPORTS_PER_SOL);
       await provider.connection.confirmTransaction(sig);
     }
+
+    lpWsolAta = await wrapSol(lp, 5 * LAMPORTS_PER_SOL);
+    lp2WsolAta = await wrapSol(lp2, 5 * LAMPORTS_PER_SOL);
 
     try {
       await program.account.config.fetch(configPda);
@@ -66,7 +96,9 @@ describe("Lending Vault", () => {
           authority,
           config: configPda,
           lendingVault: lendingVaultPda,
-          solVault: solVaultPda,
+          wsolMint: NATIVE_MINT,
+          wsolVault: wsolVaultPda,
+          tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
         .rpc();
@@ -75,7 +107,7 @@ describe("Lending Vault", () => {
 
     console.log("\n=== Setup Complete ===");
     console.log("Lending Vault PDA:", lendingVaultPda.toBase58());
-    console.log("SOL Vault PDA:", solVaultPda.toBase58());
+    console.log("WSOL Vault PDA:", wsolVaultPda.toBase58());
   });
 
   describe("Initialize Lending Vault", () => {
@@ -86,16 +118,16 @@ describe("Lending Vault", () => {
       expect(vault.totalSupplied.toNumber()).to.equal(0);
       expect(vault.totalBorrowed.toNumber()).to.equal(0);
 
-      const solVaultBalance = await provider.connection.getBalance(solVaultPda);
-      expect(solVaultBalance).to.be.greaterThan(0);
+      const wsolBalance = await provider.connection.getTokenAccountBalance(wsolVaultPda);
+      expect(Number(wsolBalance.value.amount)).to.equal(0);
 
       console.log("Vault authority:", vault.authority.toBase58());
-      console.log("SOL vault balance (rent):", solVaultBalance, "lamports");
+      console.log("WSOL vault balance:", wsolBalance.value.uiAmount, "WSOL");
     });
   });
 
   describe("Supply", () => {
-    it("LP supplies SOL and LP position is created", async () => {
+    it("LP supplies WSOL and LP position is created", async () => {
       const supplyAmount = new anchor.BN(2 * LAMPORTS_PER_SOL);
 
       const [lpPositionPda] = PublicKey.findProgramAddressSync(
@@ -103,7 +135,7 @@ describe("Lending Vault", () => {
         program.programId
       );
 
-      const solVaultBefore = await provider.connection.getBalance(solVaultPda);
+      const wsolVaultBefore = await provider.connection.getTokenAccountBalance(wsolVaultPda);
       const vaultStateBefore = await program.account.lendingVault.fetch(lendingVaultPda);
 
       await program.methods
@@ -111,8 +143,11 @@ describe("Lending Vault", () => {
         .accountsStrict({
           signer: lp.publicKey,
           lendingVault: lendingVaultPda,
-          solVault: solVaultPda,
+          wsolMint: NATIVE_MINT,
+          wsolVault: wsolVaultPda,
+          signerWsolAta: lpWsolAta,
           lpPosition: lpPositionPda,
+          tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
         .signers([lp])
@@ -128,12 +163,13 @@ describe("Lending Vault", () => {
         vaultStateBefore.totalSupplied.toNumber() + supplyAmount.toNumber()
       );
 
-      const solVaultAfter = await provider.connection.getBalance(solVaultPda);
-      expect(solVaultAfter - solVaultBefore).to.equal(supplyAmount.toNumber());
+      const wsolVaultAfter = await provider.connection.getTokenAccountBalance(wsolVaultPda);
+      expect(Number(wsolVaultAfter.value.amount) - Number(wsolVaultBefore.value.amount))
+        .to.equal(supplyAmount.toNumber());
 
-      console.log("LP supplied:", supplyAmount.toNumber() / LAMPORTS_PER_SOL, "SOL");
-      console.log("SOL vault balance:", solVaultAfter / LAMPORTS_PER_SOL, "SOL");
-      console.log("Total supplied:", vaultStateAfter.totalSupplied.toNumber() / LAMPORTS_PER_SOL, "SOL");
+      console.log("LP supplied:", supplyAmount.toNumber() / LAMPORTS_PER_SOL, "WSOL");
+      console.log("WSOL vault balance:", wsolVaultAfter.value.uiAmount, "WSOL");
+      console.log("Total supplied:", vaultStateAfter.totalSupplied.toNumber() / LAMPORTS_PER_SOL, "WSOL");
     });
 
     it("LP can top-up supply (second deposit)", async () => {
@@ -151,8 +187,11 @@ describe("Lending Vault", () => {
         .accountsStrict({
           signer: lp.publicKey,
           lendingVault: lendingVaultPda,
-          solVault: solVaultPda,
+          wsolMint: NATIVE_MINT,
+          wsolVault: wsolVaultPda,
+          signerWsolAta: lpWsolAta,
           lpPosition: lpPositionPda,
+          tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
         .signers([lp])
@@ -164,7 +203,7 @@ describe("Lending Vault", () => {
       );
 
       console.log("LP top-up successful");
-      console.log("Total supplied by LP:", positionAfter.suppliedAmount.toNumber() / LAMPORTS_PER_SOL, "SOL");
+      console.log("Total supplied by LP:", positionAfter.suppliedAmount.toNumber() / LAMPORTS_PER_SOL, "WSOL");
     });
 
     it("Multiple LPs can supply independently", async () => {
@@ -180,8 +219,11 @@ describe("Lending Vault", () => {
         .accountsStrict({
           signer: lp2.publicKey,
           lendingVault: lendingVaultPda,
-          solVault: solVaultPda,
+          wsolMint: NATIVE_MINT,
+          wsolVault: wsolVaultPda,
+          signerWsolAta: lp2WsolAta,
           lpPosition: lp2PositionPda,
+          tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
         .signers([lp2])
@@ -192,7 +234,7 @@ describe("Lending Vault", () => {
       expect(lp2Position.suppliedAmount.toNumber()).to.equal(supplyAmount.toNumber());
 
       const vaultState = await program.account.lendingVault.fetch(lendingVaultPda);
-      console.log("Total vault supplied:", vaultState.totalSupplied.toNumber() / LAMPORTS_PER_SOL, "SOL");
+      console.log("Total vault supplied:", vaultState.totalSupplied.toNumber() / LAMPORTS_PER_SOL, "WSOL");
     });
   });
 
@@ -209,7 +251,9 @@ describe("Lending Vault", () => {
             authority: rogue.publicKey,
             config: configPda,
             lendingVault: lendingVaultPda,
-            solVault: solVaultPda,
+            wsolMint: NATIVE_MINT,
+            wsolVault: wsolVaultPda,
+            tokenProgram: TOKEN_PROGRAM_ID,
             systemProgram: SystemProgram.programId,
           })
           .signers([rogue])
@@ -230,7 +274,9 @@ describe("Lending Vault", () => {
             authority,
             config: configPda,
             lendingVault: lendingVaultPda,
-            solVault: solVaultPda,
+            wsolMint: NATIVE_MINT,
+            wsolVault: wsolVaultPda,
+            tokenProgram: TOKEN_PROGRAM_ID,
             systemProgram: SystemProgram.programId,
           })
           .rpc();
@@ -252,6 +298,13 @@ describe("Lending Vault", () => {
         program.programId
       );
 
+      const noPositionWsolAta = (await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        provider.wallet.payer,
+        NATIVE_MINT,
+        noPosition.publicKey
+      )).address;
+
       try {
         await program.methods
           .withdraw()
@@ -259,7 +312,10 @@ describe("Lending Vault", () => {
             signer: noPosition.publicKey,
             lpPosition: lpPositionPda,
             lendingVault: lendingVaultPda,
-            solVault: solVaultPda,
+            wsolMint: NATIVE_MINT,
+            wsolVault: wsolVaultPda,
+            signerWsolAta: noPositionWsolAta,
+            tokenProgram: TOKEN_PROGRAM_ID,
             systemProgram: SystemProgram.programId,
           })
           .signers([noPosition])
@@ -274,15 +330,15 @@ describe("Lending Vault", () => {
   });
 
   describe("Withdraw", () => {
-    it("LP withdraws and receives SOL back", async () => {
+    it("LP withdraws and receives WSOL back", async () => {
       const [lpPositionPda] = PublicKey.findProgramAddressSync(
         [Buffer.from("lp_position"), lp.publicKey.toBuffer()],
         program.programId
       );
 
       const positionBefore = await program.account.lpPosition.fetch(lpPositionPda);
-      const lpBalanceBefore = await provider.connection.getBalance(lp.publicKey);
-      const solVaultBefore = await provider.connection.getBalance(solVaultPda);
+      const lpWsolBefore = await provider.connection.getTokenAccountBalance(lpWsolAta);
+      const wsolVaultBefore = await provider.connection.getTokenAccountBalance(wsolVaultPda);
       const vaultStateBefore = await program.account.lendingVault.fetch(lendingVaultPda);
 
       await program.methods
@@ -291,13 +347,15 @@ describe("Lending Vault", () => {
           signer: lp.publicKey,
           lpPosition: lpPositionPda,
           lendingVault: lendingVaultPda,
-          solVault: solVaultPda,
+          wsolMint: NATIVE_MINT,
+          wsolVault: wsolVaultPda,
+          signerWsolAta: lpWsolAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
         .signers([lp])
         .rpc();
 
-      // LP position should be closed
       try {
         await program.account.lpPosition.fetch(lpPositionPda);
         throw new Error("LP position should have been closed");
@@ -305,23 +363,23 @@ describe("Lending Vault", () => {
         expect(e.message).to.match(/Account does not exist|not found/i);
       }
 
-      // LP balance should have increased by supplied amount (+ rent from closed account)
-      const lpBalanceAfter = await provider.connection.getBalance(lp.publicKey);
-      expect(lpBalanceAfter).to.be.greaterThan(lpBalanceBefore);
+      const lpWsolAfter = await provider.connection.getTokenAccountBalance(lpWsolAta);
+      expect(Number(lpWsolAfter.value.amount)).to.be.gte(
+        Number(lpWsolBefore.value.amount) + positionBefore.suppliedAmount.toNumber()
+      );
 
-      // Sol vault balance should have decreased
-      const solVaultAfter = await provider.connection.getBalance(solVaultPda);
-      expect(solVaultBefore - solVaultAfter).to.equal(positionBefore.suppliedAmount.toNumber());
+      const wsolVaultAfter = await provider.connection.getTokenAccountBalance(wsolVaultPda);
+      expect(Number(wsolVaultBefore.value.amount) - Number(wsolVaultAfter.value.amount))
+        .to.equal(positionBefore.suppliedAmount.toNumber());
 
-      // total_supplied should have decreased by principal
       const vaultStateAfter = await program.account.lendingVault.fetch(lendingVaultPda);
       expect(vaultStateAfter.totalSupplied.toNumber()).to.equal(
         vaultStateBefore.totalSupplied.toNumber() - positionBefore.suppliedAmount.toNumber()
       );
 
-      console.log("LP withdrew:", positionBefore.suppliedAmount.toNumber() / LAMPORTS_PER_SOL, "SOL");
-      console.log("LP balance after:", lpBalanceAfter / LAMPORTS_PER_SOL, "SOL");
-      console.log("SOL vault after:", solVaultAfter / LAMPORTS_PER_SOL, "SOL");
+      console.log("LP withdrew:", positionBefore.suppliedAmount.toNumber() / LAMPORTS_PER_SOL, "WSOL");
+      console.log("LP WSOL balance after:", lpWsolAfter.value.uiAmount, "WSOL");
+      console.log("WSOL vault after:", wsolVaultAfter.value.uiAmount, "WSOL");
     });
 
     it("Cannot withdraw someone else's position", async () => {
@@ -337,7 +395,10 @@ describe("Lending Vault", () => {
             signer: lp.publicKey,
             lpPosition: lp2PositionPda,
             lendingVault: lendingVaultPda,
-            solVault: solVaultPda,
+            wsolMint: NATIVE_MINT,
+            wsolVault: wsolVaultPda,
+            signerWsolAta: lpWsolAta,
+            tokenProgram: TOKEN_PROGRAM_ID,
             systemProgram: SystemProgram.programId,
           })
           .signers([lp])

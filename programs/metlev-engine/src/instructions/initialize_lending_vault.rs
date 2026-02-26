@@ -1,10 +1,10 @@
-use anchor_lang::{prelude::*, system_program::{Transfer, transfer}};
-use crate::state::LendingVault;
-use crate::state::Config;
+use anchor_lang::prelude::*;
+use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
+use crate::state::{LendingVault, Config};
 use crate::errors::ProtocolError;
 
 #[derive(Accounts)]
-pub struct InitializeLendingVault<'info>{
+pub struct InitializeLendingVault<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
 
@@ -24,40 +24,33 @@ pub struct InitializeLendingVault<'info>{
     )]
     pub lending_vault: Account<'info, LendingVault>,
 
+    #[account(address = anchor_spl::token::spl_token::native_mint::id())]
+    pub wsol_mint: InterfaceAccount<'info, Mint>,
+
     #[account(
-        mut,
-        seeds = [b"sol_vault", lending_vault.key().as_ref()],
+        init,
+        payer = authority,
+        token::mint = wsol_mint,
+        token::authority = lending_vault,
+        seeds = [b"wsol_vault", lending_vault.key().as_ref()],
         bump,
     )]
-    pub sol_vault: SystemAccount<'info>,
+    pub wsol_vault: InterfaceAccount<'info, TokenAccount>,
 
+    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 
 impl<'info> InitializeLendingVault<'info> {
     pub fn initialize_lending_vault(&mut self, bumps: &InitializeLendingVaultBumps) -> Result<()> {
-        let rent_exempt = Rent::get()?.minimum_balance(
-            self.sol_vault.to_account_info().data_len()
-        );
-        let accounts = Transfer {
-            from: self.authority.to_account_info(),
-            to: self.sol_vault.to_account_info(),
-        };
-
-        let ctx = CpiContext::new(
-            self.system_program.to_account_info(),
-            accounts,
-        );
-        transfer(ctx, rent_exempt)?;
-
         self.lending_vault.set_inner(LendingVault {
             authority: self.authority.key(),
             total_supplied: 0,
             total_borrowed: 0,
-            interest_rate_bps: 30, // Let's update that later to be dynamic
+            interest_rate_bps: 30,
             last_update: Clock::get()?.unix_timestamp,
             bump: bumps.lending_vault,
-            vault_bump: bumps.sol_vault,
+            vault_bump: bumps.wsol_vault,
         });
         Ok(())
     }

@@ -6,10 +6,10 @@ pub struct LpPosition {
     /// LP provider wallet
     pub lp: Pubkey,
 
-    /// Total SOL supplied (in lamports)
+    /// Total WSOL supplied (in lamports, 9 decimals)
     pub supplied_amount: u64,
 
-    /// Accumulated interest earned so far (in lamports)
+    /// Accumulated interest earned so far (in lamports, 9 decimals)
     pub interest_earned: u64,
 
     /// Last time interest was accrued (unix timestamp)

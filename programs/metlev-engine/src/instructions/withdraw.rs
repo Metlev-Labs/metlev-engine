@@ -1,5 +1,7 @@
-use anchor_lang::{prelude::*, system_program::{Transfer, transfer}};
-
+use anchor_lang::prelude::*;
+use anchor_spl::token_interface::{
+    transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
+};
 use crate::state::{LpPosition, LendingVault};
 use crate::errors::ProtocolError;
 
@@ -24,56 +26,65 @@ pub struct Withdraw<'info> {
     )]
     pub lending_vault: Account<'info, LendingVault>,
 
+    #[account(address = anchor_spl::token::spl_token::native_mint::id())]
+    pub wsol_mint: InterfaceAccount<'info, Mint>,
+
     #[account(
         mut,
-        seeds = [b"sol_vault", lending_vault.key().as_ref()],
+        seeds = [b"wsol_vault", lending_vault.key().as_ref()],
         bump = lending_vault.vault_bump,
+        token::mint = wsol_mint,
+        token::authority = lending_vault,
     )]
-    pub sol_vault: SystemAccount<'info>,
+    pub wsol_vault: InterfaceAccount<'info, TokenAccount>,
 
+    #[account(
+        mut,
+        token::mint = wsol_mint,
+        token::authority = signer,
+    )]
+    pub signer_wsol_ata: InterfaceAccount<'info, TokenAccount>,
+
+    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
-
 }
 
 impl<'info> Withdraw<'info> {
     pub fn withdraw(&mut self) -> Result<()> {
-
-        // TODO update this later for an algo based on the supply and demande dynamic APY
-         self.lp_position.accrue_interest(
+        // TODO: update later for algo-based dynamic APY
+        self.lp_position.accrue_interest(
             self.lending_vault.interest_rate_bps,
-
-            Clock::get()?.unix_timestamp
+            Clock::get()?.unix_timestamp,
         );
         let amount = self.lp_position.claimable();
 
-
-        let rent_exempt = Rent::get()?.minimum_balance(0);
         require!(
-            self.sol_vault.get_lamports() >= amount + rent_exempt,
+            self.wsol_vault.amount >= amount,
             ProtocolError::InsufficientLiquidity
         );
 
-        self.lending_vault.total_supplied =  self.lending_vault.total_supplied
+        self.lending_vault.total_supplied = self.lending_vault.total_supplied
             .checked_sub(self.lp_position.supplied_amount)
             .ok_or(ProtocolError::MathUnderflow)?;
 
-        let accounts = Transfer{
-            from: self.sol_vault.to_account_info(),
-            to: self.signer.to_account_info()
-        };
-        let lending_vault_key = self.lending_vault.key();
+        // lending_vault PDA is the authority of wsol_vault
+        let lending_vault_bump = self.lending_vault.bump;
         let signer_seeds: &[&[&[u8]]] = &[&[
-            b"sol_vault",
-            lending_vault_key.as_ref(),
-            &[self.lending_vault.vault_bump],
-            ]
-        ];
-        let ctx = CpiContext::new_with_signer(
-            self.system_program.to_account_info(),
-            accounts,
-            signer_seeds
-        );
+            LendingVault::SEED_PREFIX,
+            &[lending_vault_bump],
+        ]];
 
-        transfer(ctx, amount)
+        let accounts = TransferChecked {
+            from: self.wsol_vault.to_account_info(),
+            mint: self.wsol_mint.to_account_info(),
+            to: self.signer_wsol_ata.to_account_info(),
+            authority: self.lending_vault.to_account_info(),
+        };
+        let ctx = CpiContext::new_with_signer(
+            self.token_program.to_account_info(),
+            accounts,
+            signer_seeds,
+        );
+        transfer_checked(ctx, amount, self.wsol_mint.decimals)
     }
 }

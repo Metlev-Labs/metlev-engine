@@ -38,7 +38,7 @@ pub struct OpenPosition<'info> {
 
     #[account(
         mut,
-        seeds = [Position::SEED_PREFIX, user.key().as_ref(), position.collateral_mint.as_ref()],
+        seeds = [Position::SEED_PREFIX, user.key().as_ref(), wsol_mint.key().as_ref()],
         bump = position.bump,
         constraint = position.owner == user.key() @ ProtocolError::InvalidOwner,
         constraint = position.is_active() @ ProtocolError::PositionNotActive,

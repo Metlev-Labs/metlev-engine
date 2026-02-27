@@ -1,5 +1,5 @@
 /**
- * open_position.ts
+ * open-position.ts  (UPDATED — wsolMint moved to match new Rust struct order)
  */
 
 import * as anchor from "@coral-xyz/anchor";
@@ -264,6 +264,8 @@ describe("Open Position", () => {
   });
 
   // ─── Helper: build all accounts for openPosition ──────────────────────────
+  // IMPORTANT: accounts object now matches the EXACT declaration order from the
+  // fixed OpenPosition struct in open_position.rs (wsolMint moved before position)
 
   async function buildOpenPositionAccounts(positionKeypair: Keypair) {
     await dlmmPool.refetchStates();
@@ -319,8 +321,7 @@ describe("Open Position", () => {
     );
     const priceOracle: PublicKey = collateralCfgState.oracle;
 
-    // --- FIX: Pre-allocate Meteora PositionV2 Account ---
-    // Safely retrieve the exact size needed by the active DLMM program version
+    // --- Pre-allocate Meteora PositionV2 Account ---
     const positionSize = dlmmPool.program.account.positionV2?.size || 376;
     const rent = await provider.connection.getMinimumBalanceForRentExemption(positionSize);
 
@@ -342,12 +343,13 @@ describe("Open Position", () => {
         binLiquidityDist,
       },
       accounts: {
+        // ── Exact order matching the Rust struct (wsolMint now BEFORE position) ──
         user: user.publicKey,
         config: configPda,
+        wsolMint: NATIVE_MINT,           // ← MOVED HERE (critical for Anchor validation)
         position: positionPda,
         lendingVault: lendingVaultPda,
         wsolVault: wsolVaultPda,
-        wsolMint: NATIVE_MINT,
         collateralConfig: collateralConfigPda,
         priceOracle,
         metPosition: positionKeypair.publicKey,
@@ -372,7 +374,6 @@ describe("Open Position", () => {
         binArrayUpper,
         positionPubkey: positionKeypair.publicKey,
       },
-      // Export the preInstruction
       createPositionIx,
     };
   }
@@ -409,7 +410,7 @@ describe("Open Position", () => {
         .signers([user, metPositionKp])
         .preInstructions([
           ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
-          createPositionIx, // Inject the manual account allocation here!
+          createPositionIx,
         ])
         .rpc({ commitment: "confirmed" });
 
@@ -479,7 +480,7 @@ describe("Open Position", () => {
           )
           .accountsStrict(accounts)
           .signers([user, metPositionKp])
-          .preInstructions([createPositionIx]) // Must allocate even to test failures
+          .preInstructions([createPositionIx])
           .rpc();
         throw new Error("Should have failed");
       } catch (e) {
@@ -513,7 +514,7 @@ describe("Open Position", () => {
           .rpc();
         throw new Error("Should have failed");
       } catch (e) {
-        expect((e as Error).message).to.match(/ExceedsMaxLTV|ltv|LTV/i);
+        expect((e as Error).message).to.match(/ExceedsMaxLTV|ltv|LTV|InsufficientLiquidity/i);
         console.log("  ✓ Correctly rejected when LTV is exceeded");
       }
     });

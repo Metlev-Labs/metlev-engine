@@ -36,6 +36,10 @@ pub struct OpenPosition<'info> {
     )]
     pub config: Account<'info, Config>,
 
+    /// wSOL mint — needed for the wsol_vault token constraint.
+    #[account(address = anchor_spl::token::spl_token::native_mint::id())]
+    pub wsol_mint: InterfaceAccount<'info, Mint>,
+
     #[account(
         mut,
         seeds = [Position::SEED_PREFIX, user.key().as_ref(), wsol_mint.key().as_ref()],
@@ -68,12 +72,8 @@ pub struct OpenPosition<'info> {
     )]
     pub wsol_vault: InterfaceAccount<'info, TokenAccount>,
 
-    /// wSOL mint — needed for the wsol_vault token constraint.
-    #[account(address = anchor_spl::token::spl_token::native_mint::id())]
-    pub wsol_mint: InterfaceAccount<'info, Mint>,
-
     #[account(
-        seeds = [CollateralConfig::SEED_PREFIX, position.collateral_mint.as_ref()],
+        seeds = [CollateralConfig::SEED_PREFIX, wsol_mint.key().as_ref()],
         bump = collateral_config.bump,
         constraint = collateral_config.is_enabled() @ ProtocolError::InvalidCollateralType,
     )]

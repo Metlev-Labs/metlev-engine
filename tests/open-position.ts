@@ -4,21 +4,21 @@
  * Integration tests for the `open_position` instruction.
  *
  * Flow tested:
- *   1. Protocol init  (config + lending vault)
- *   2. LP supplies wSOL liquidity to lending vault
- *   3. User deposits collateral to create a protocol Position
- *   4. User calls `openPosition` which:
- *        a. Borrows wSOL from the vault (leverage × collateral)
- *        b. CPI → Meteora initialize_position
- *        c. CPI → Meteora add_liquidity_one_side  (signed by lending_vault PDA)
+ * 1. Protocol init  (config + lending vault)
+ * 2. LP supplies wSOL liquidity to lending vault
+ * 3. User deposits collateral to create a protocol Position
+ * 4. User calls `openPosition` which:
+ * a. Borrows wSOL from the vault (leverage × collateral)
+ * b. CPI → Meteora initialize_position
+ * c. CPI → Meteora add_liquidity_one_side  (signed by lending_vault PDA)
  *
  * Prerequisites:
- *   - Devnet pool `9zUvxwFTcuumU6Dkq68wWEAiLEmA4sp1amdG96aY7Tmq` must be live.
- *   - The bin arrays covering your chosen bin range must already be initialised.
- *     Call `dlmmPool.initializeBinArrays(...)` once per range if they are not.
+ * - Devnet pool `9zUvxwFTcuumU6Dkq68wWEAiLEmA4sp1amdG96aY7Tmq` must be live.
+ * - The bin arrays covering your chosen bin range must already be initialised.
+ * Call `dlmmPool.initializeBinArrays(...)` once per range if they are not.
  *
  * Install dependencies:
- *   yarn add @meteora-ag/dlmm @coral-xyz/anchor @solana/web3.js @solana/spl-token bn.js
+ * yarn add @meteora-ag/dlmm @coral-xyz/anchor @solana/web3.js @solana/spl-token bn.js
  */
 
 import * as anchor from "@coral-xyz/anchor";
@@ -182,8 +182,10 @@ describe("Open Position", () => {
       [Buffer.from("wsol_vault"), lendingVaultPda.toBuffer()],
       program.programId
     );
+    
+    // Updated to match 3 seeds from deposit_sol_collateral
     [positionPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("position"), user.publicKey.toBuffer()],
+      [Buffer.from("position"), user.publicKey.toBuffer(), NATIVE_MINT.toBuffer()], 
       program.programId
     );
     [lpPositionPda] = PublicKey.findProgramAddressSync(
@@ -266,35 +268,37 @@ describe("Open Position", () => {
     }
 
     // ── User deposits 2 SOL collateral to create protocol Position ───────────
-    // NOTE: This assumes a `depositCollateral` instruction exists. Adjust the
-    //       method name / accounts to match your actual implementation.
     try {
       await program.account.position.fetch(positionPda);
-      console.log("  User position already exists, skipping deposit.");
+      console.log("  ✓ User position already exists, skipping deposit.");
     } catch {
-      // Assuming your instruction is named `depositCollateral` and accepts an amount.
-      // The collateralConfig PDA must exist with the wSOL mint registered.
+      console.log("  Depositing 2 SOL to open a new position...");
       [collateralConfigPda] = PublicKey.findProgramAddressSync(
         [Buffer.from("collateral_config"), NATIVE_MINT.toBuffer()],
         program.programId
       );
 
+      // Derive the collateral vault PDA required by deposit_sol_collateral.rs
+      const [collateralVaultPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), user.publicKey.toBuffer(), NATIVE_MINT.toBuffer()],
+        program.programId
+      );
+
       await program.methods
-        .depositCollateral(new BN(2 * LAMPORTS_PER_SOL))
+        .depositSolCollateral(new BN(2 * LAMPORTS_PER_SOL)) // Correct method name
         .accountsStrict({
           user: user.publicKey,
           config: configPda,
-          position: positionPda,
+          mint: NATIVE_MINT, // Correct account name expected by Rust
           collateralConfig: collateralConfigPda,
-          collateralMint: NATIVE_MINT,
-          userCollateralAta: userWsolAta,
-          // add remaining accounts your instruction needs
-          tokenProgram: TOKEN_PROGRAM_ID,
+          vault: collateralVaultPda, // Add missing vault PDA
+          position: positionPda,
           systemProgram: SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
         })
         .signers([user])
         .rpc();
-      console.log("  User deposited 2 wSOL as collateral.");
+      console.log("  ✓ User deposited 2 SOL as collateral.");
     }
 
     // ── Fetch existing collateralConfig PDA (may have been set above) ─────────
@@ -320,11 +324,6 @@ describe("Open Position", () => {
 
   // ─── Helper: build all accounts for openPosition ──────────────────────────
 
-  /**
-   * Uses the DLMM SDK to determine the current market state, picks the correct
-   * bin range for single-sided wSOL deposit, and returns every account + param
-   * needed by the `openPosition` instruction.
-   */
   async function buildOpenPositionAccounts(positionKeypair: Keypair) {
     // Refresh on-chain state so we have current active bin
     await dlmmPool.refetchStates();
@@ -573,9 +572,9 @@ describe("Open Position", () => {
 
   describe("openPosition — constraints", () => {
     it("Rejects when protocol is paused", async () => {
-      // Pause the protocol first
+      // Pause the protocol first - UPDATED METHOD NAME
       await program.methods
-        .setPaused(true)
+        .updatePauseState(true)
         .accountsStrict({
           authority,
           config: configPda,
@@ -608,9 +607,9 @@ describe("Open Position", () => {
         );
         console.log("  ✓ Correctly rejected when protocol is paused");
       } finally {
-        // Un-pause for subsequent tests
+        // Un-pause for subsequent tests - UPDATED METHOD NAME
         await program.methods
-          .setPaused(false)
+          .updatePauseState(false)
           .accountsStrict({ authority, config: configPda })
           .rpc();
       }
@@ -653,9 +652,6 @@ describe("Open Position", () => {
         metPositionKp
       );
 
-      // Borrow all vault liquidity first (simulate near-empty vault)
-      // Here we just use an amount we know exceeds what's available.
-      // Adjust to match your lending_vault.borrow() logic.
       try {
         await program.methods
           .openPosition(

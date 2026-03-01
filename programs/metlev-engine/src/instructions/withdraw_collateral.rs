@@ -39,8 +39,15 @@ impl<'info> WithdrawCollateral<'info> {
         let collateral = self.position.collateral_amount;
 
         if collateral > 0 {
-            let user_key      = self.user.key();
-            let wsol_key      = self.wsol_mint.key();
+            require!(
+                self.collateral_vault.lamports() >= collateral,
+                ProtocolError::WithdrawalFailed
+            );
+
+            self.position.collateral_amount = 0;
+
+            let user_key       = self.user.key();
+            let wsol_key       = self.wsol_mint.key();
             let vault_bump_arr = [bumps.collateral_vault];
             let vault_seeds: &[&[&[u8]]] = &[&[
                 b"vault",
@@ -60,6 +67,7 @@ impl<'info> WithdrawCollateral<'info> {
                 collateral,
             )?;
         }
+
         Ok(())
     }
 }

@@ -16,7 +16,7 @@ pub struct Liquidate<'info> {
 
     #[account(
         mut,
-        seeds = [Position::SEED_PREFIX, position.owner.key().as_ref()],
+        seeds = [Position::SEED_PREFIX, position.owner.key().as_ref(), position.collateral_mint.as_ref()],
         bump = position.bump,
         constraint = position.is_active() @ ProtocolError::PositionNotActive,
     )]

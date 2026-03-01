@@ -97,8 +97,7 @@ pub mod metlev_engine {
         from_bin_id: i32,
         to_bin_id: i32,
     ) -> Result<()> {
-        // ctx.accounts.close(from_bin_id, to_bin_id)
-        Ok(())
+        ctx.accounts.close(from_bin_id, to_bin_id)
     }
 
     pub fn withdraw_collateral(ctx: Context<WithdrawCollateral>) -> Result<()> {

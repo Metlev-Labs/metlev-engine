@@ -26,14 +26,14 @@ pub struct ClosePosition<'info> {
         constraint = position.owner == user.key() @ ProtocolError::InvalidOwner,
         constraint = position.is_active() @ ProtocolError::PositionNotActive,
     )]
-    pub position: Account<'info, Position>,
+    pub position: Box<Account<'info, Position>>,
 
     #[account(
         mut,
         seeds = [LendingVault::SEED_PREFIX],
         bump = lending_vault.bump,
     )]
-    pub lending_vault: Account<'info, LendingVault>,
+    pub lending_vault: Box<Account<'info, LendingVault>>,
 
     /// Receives the wSOL proceeds (token Y) from DLMM remove_liquidity / swap.
     #[account(
@@ -118,8 +118,31 @@ impl<'info> ClosePosition<'info> {
         let signer_seeds: &[&[&[u8]]] = &[&[LendingVault::SEED_PREFIX, &[vault_bump]]];
         let debt = self.position.debt_amount;
 
-        //    wSOL (token Y) goes to wsol_vault; any X-side tokens go to user_token_x.
-        let remove_ctx = CpiContext::new_with_signer(
+        self.cpi_remove_liquidity(signer_seeds, from_bin_id, to_bin_id)?;
+        self.cpi_claim_fee(signer_seeds)?;
+
+        self.user_token_x.reload()?;
+        let x_balance = self.user_token_x.amount;
+        if x_balance > 0 {
+            self.cpi_swap(signer_seeds, x_balance)?;
+        }
+
+        self.cpi_close_position(signer_seeds)?;
+
+        self.position.debt_amount = 0;
+        self.lending_vault.repay(debt)?;
+        self.position.mark_closed();
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn cpi_remove_liquidity(
+        &self,
+        signer_seeds: &[&[&[u8]]],
+        from_bin_id: i32,
+        to_bin_id: i32,
+    ) -> Result<()> {
+        let ctx = CpiContext::new_with_signer(
             self.dlmm_program.to_account_info(),
             dlmm::cpi::accounts::RemoveLiquidityByRange {
                 position:                   self.met_position.to_account_info(),
@@ -144,45 +167,70 @@ impl<'info> ClosePosition<'info> {
             },
             signer_seeds,
         );
-        dlmm::cpi::remove_liquidity_by_range(remove_ctx, from_bin_id, to_bin_id, 10_000)?;
+        dlmm::cpi::remove_liquidity_by_range(ctx, from_bin_id, to_bin_id, 10_000)
+    }
 
-        // Re-read user_token_x balance from the account data updated by the CPI above.
-        self.user_token_x.reload()?;
-        //If any X tokens landed in user_token_x (price moved in-range), swap them back to
-        //    wSOL so the full debt can be repaid from wsol_vault.
-        let x_balance = self.user_token_x.amount;
-        if x_balance > 0 {
-            let swap_ctx = CpiContext::new_with_signer(
-                self.dlmm_program.to_account_info(),
-                dlmm::cpi::accounts::Swap {
-                    lb_pair:                    self.lb_pair.to_account_info(),
-                    bin_array_bitmap_extension: self
-                        .bin_array_bitmap_extension
-                        .as_ref()
-                        .map(|a| a.to_account_info()),
-                    reserve_x:       self.reserve_x.to_account_info(),
-                    reserve_y:       self.reserve_y.to_account_info(),
-                    user_token_in:   self.user_token_x.to_account_info(),
-                    user_token_out:  self.wsol_vault.to_account_info(),
-                    token_x_mint:    self.token_x_mint.to_account_info(),
-                    token_y_mint:    self.token_y_mint.to_account_info(),
-                    oracle:          self.oracle.to_account_info(),
-                    host_fee_in:     None,
-                    user:            self.lending_vault.to_account_info(),
-                    token_x_program: self.token_program.to_account_info(),
-                    token_y_program: self.token_program.to_account_info(),
-                    event_authority: self.event_authority.to_account_info(),
-                    program:         self.dlmm_program.to_account_info(),
-                },
-                signer_seeds,
-            );
-            // min_amount_out = 0 for POC
-            // for a production caller supplied min derived from the oracle price.
-            dlmm::cpi::swap(swap_ctx, x_balance, 0)?;
-        }
+    #[inline(never)]
+    fn cpi_claim_fee(&self, signer_seeds: &[&[&[u8]]]) -> Result<()> {
+        let ctx = CpiContext::new_with_signer(
+            self.dlmm_program.to_account_info(),
+            dlmm::cpi::accounts::ClaimFee {
+                lb_pair:         self.lb_pair.to_account_info(),
+                position:        self.met_position.to_account_info(),
+                bin_array_lower: self.bin_array_lower.to_account_info(),
+                bin_array_upper: self.bin_array_upper.to_account_info(),
+                sender:          self.lending_vault.to_account_info(),
+                reserve_x:       self.reserve_x.to_account_info(),
+                reserve_y:       self.reserve_y.to_account_info(),
+                user_token_x:    self.user_token_x.to_account_info(),
+                user_token_y:    self.wsol_vault.to_account_info(),
+                token_x_mint:    self.token_x_mint.to_account_info(),
+                token_y_mint:    self.token_y_mint.to_account_info(),
+                token_program:   self.token_program.to_account_info(),
+                event_authority: self.event_authority.to_account_info(),
+                program:         self.dlmm_program.to_account_info(),
+            },
+            signer_seeds,
+        );
+        dlmm::cpi::claim_fee(ctx)
+    }
 
-        // Close the DLMM position account rent lamports go back to user.
-        let close_ctx = CpiContext::new_with_signer(
+    #[inline(never)]
+    fn cpi_swap(&self, signer_seeds: &[&[&[u8]]], amount: u64) -> Result<()> {
+        let ctx = CpiContext::new_with_signer(
+            self.dlmm_program.to_account_info(),
+            dlmm::cpi::accounts::Swap {
+                lb_pair:                    self.lb_pair.to_account_info(),
+                bin_array_bitmap_extension: self
+                    .bin_array_bitmap_extension
+                    .as_ref()
+                    .map(|a| a.to_account_info()),
+                reserve_x:       self.reserve_x.to_account_info(),
+                reserve_y:       self.reserve_y.to_account_info(),
+                user_token_in:   self.user_token_x.to_account_info(),
+                user_token_out:  self.wsol_vault.to_account_info(),
+                token_x_mint:    self.token_x_mint.to_account_info(),
+                token_y_mint:    self.token_y_mint.to_account_info(),
+                oracle:          self.oracle.to_account_info(),
+                host_fee_in:     None,
+                user:            self.lending_vault.to_account_info(),
+                token_x_program: self.token_program.to_account_info(),
+                token_y_program: self.token_program.to_account_info(),
+                event_authority: self.event_authority.to_account_info(),
+                program:         self.dlmm_program.to_account_info(),
+            },
+            signer_seeds,
+        )
+        .with_remaining_accounts(vec![
+            self.bin_array_lower.to_account_info(),
+            self.bin_array_upper.to_account_info(),
+        ]);
+        dlmm::cpi::swap(ctx, amount, 0)
+    }
+
+    #[inline(never)]
+    fn cpi_close_position(&self, signer_seeds: &[&[&[u8]]]) -> Result<()> {
+        let ctx = CpiContext::new_with_signer(
             self.dlmm_program.to_account_info(),
             dlmm::cpi::accounts::ClosePosition {
                 position:        self.met_position.to_account_info(),
@@ -196,11 +244,6 @@ impl<'info> ClosePosition<'info> {
             },
             signer_seeds,
         );
-        dlmm::cpi::close_position(close_ctx)?;
-
-        self.position.debt_amount = 0;
-        self.lending_vault.repay(debt)?;
-        self.position.mark_closed();
-        Ok(())
+        dlmm::cpi::close_position(ctx)
     }
 }

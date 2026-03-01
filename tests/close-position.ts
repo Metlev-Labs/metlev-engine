@@ -10,10 +10,13 @@ import {
   SYSVAR_RENT_PUBKEY,
   Transaction,
   ComputeBudgetProgram,
+  sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import {
   getOrCreateAssociatedTokenAccount,
   createSyncNativeInstruction,
+  createMint,
+  mintTo,
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   NATIVE_MINT,
@@ -68,6 +71,13 @@ describe("Close Position", () => {
   let dlmmPool: DLMM;
 
   // ─── Helpers ────────────────────────────────────────────────────────────────
+
+  // Send SDK-generated transactions (fee payer = first signer, NOT provider wallet)
+  async function sendSdkTx(tx: Transaction, signers: Keypair[]): Promise<string> {
+    tx.feePayer = signers[0].publicKey;
+    tx.recentBlockhash = (await provider.connection.getLatestBlockhash()).blockhash;
+    return sendAndConfirmTransaction(provider.connection, tx, signers);
+  }
 
   async function wrapSol(payer: Keypair, recipient: PublicKey, lamports: number): Promise<PublicKey> {
     const ata = await getOrCreateAssociatedTokenAccount(
@@ -540,10 +550,401 @@ describe("Close Position", () => {
     });
   });
 
-  // ─── Constraints ────────────────────────────────────────────────────────────
+  // ─── In-range / losing position ─────────────────────────────────────────────
+
+  describe("closePosition — in-range position (losing position with internal swap)", () => {
+    const mmUser = Keypair.generate();   // market maker — seeds fresh pool
+    const posUser = Keypair.generate();  // position owner
+    const swapUser = Keypair.generate(); // external trader moves price
+
+    let freshPool: DLMM;
+    let freshLbPair: PublicKey;
+    let customMint: PublicKey;
+    let positionPda: PublicKey;
+    let collateralVaultPda: PublicKey;
+    let metPositionKp: Keypair;
+    let openedMinBinId: number;
+    let openedMaxBinId: number;
+    let debtBefore: BN;
+    const depositAmount = new BN(2 * LAMPORTS_PER_SOL);
+
+    // Scoped helpers — use freshLbPair instead of module-level LB_PAIR
+    function deriveFreshBinArrayPda(index: BN): PublicKey {
+      const indexBuf = Buffer.alloc(8);
+      indexBuf.writeBigInt64LE(BigInt(index.toString()));
+      const [pda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("bin_array"), freshLbPair.toBuffer(), indexBuf],
+        DLMM_PROGRAM_ID
+      );
+      return pda;
+    }
+
+    async function ensureFreshBinArrayExists(index: BN): Promise<void> {
+      const pda = deriveFreshBinArrayPda(index);
+      if (await provider.connection.getAccountInfo(pda)) return;
+      const ixs = await freshPool.initializeBinArrays([index], authority);
+      if (ixs.length > 0) await provider.sendAndConfirm(new Transaction().add(...ixs));
+    }
+
+    before("Create fresh pool, seed liquidity, open position, push price", async function () {
+      this.timeout(120_000);
+
+      const sigs = await Promise.all([
+        provider.connection.requestAirdrop(mmUser.publicKey, 20 * LAMPORTS_PER_SOL),
+        provider.connection.requestAirdrop(posUser.publicKey, 10 * LAMPORTS_PER_SOL),
+        provider.connection.requestAirdrop(swapUser.publicKey, 15 * LAMPORTS_PER_SOL),
+      ]);
+      await Promise.all(sigs.map(s => provider.connection.confirmTransaction(s)));
+
+      customMint = await createMint(
+        provider.connection,
+        mmUser,            // payer
+        mmUser.publicKey,  // mint authority
+        null,              // freeze authority
+        9
+      );
+
+      // Mint to market maker
+      const mmTokenAta = await getOrCreateAssociatedTokenAccount(
+        provider.connection, mmUser, customMint, mmUser.publicKey
+      );
+      await mintTo(
+        provider.connection, mmUser, customMint,
+        mmTokenAta.address, mmUser,
+        BigInt(1_000_000) * BigInt(10 ** 9)
+      );
+
+      // Mint to swapUser (they sell customMint to push price through position)
+      const swapTokenAta = await getOrCreateAssociatedTokenAccount(
+        provider.connection, mmUser, customMint, swapUser.publicKey
+      );
+      await mintTo(
+        provider.connection, mmUser, customMint,
+        swapTokenAta.address, mmUser,
+        BigInt(500_000) * BigInt(10 ** 9)
+      );
+
+      await wrapSol(mmUser, mmUser.publicKey, 10 * LAMPORTS_PER_SOL);
+
+      // new DLMM pool
+      const createPoolTx = await (DLMM as any).createCustomizablePermissionlessLbPair(
+        provider.connection,
+        new BN(10),          // binStep (10 bps = 0.1%)
+        customMint,          // token X
+        NATIVE_MINT,         // token Y (wSOL)
+        new BN(0),           // activeId
+        new BN(50),          // feeBps (0.5%)
+        0,                   // activationType = Slot
+        false,               // hasAlphaVault
+        mmUser.publicKey,    // creator
+        null,                // activationPoint (immediate)
+        false,               // creatorPoolOnOffControl
+        { cluster: "devnet" }
+      );
+      await sendSdkTx(createPoolTx, [mmUser]);
+
+      // Derive pool address and create SDK instance
+      const [derivedPair] = (DLMM as any).deriveCustomizablePermissionlessLbPair(
+        customMint, NATIVE_MINT, DLMM_PROGRAM_ID
+      );
+      freshLbPair = derivedPair;
+      freshPool = await DLMM.create(provider.connection, freshLbPair, { cluster: "devnet" });
+      await freshPool.refetchStates();
+
+      const isWsolX = freshPool.lbPair.tokenXMint.equals(NATIVE_MINT);
+      console.log("  Fresh pool:", freshLbPair.toBase58());
+      console.log("  Token X:", freshPool.lbPair.tokenXMint.toBase58(), isWsolX ? "(wSOL)" : "(custom)");
+      console.log("  Token Y:", freshPool.lbPair.tokenYMint.toBase58(), !isWsolX ? "(wSOL)" : "(custom)");
+
+      // ── Seed two-sided liquidity ──
+      const activeBin = await freshPool.getActiveBin();
+      const SEED_RANGE = 30;
+      const seedMinBin = activeBin.binId - SEED_RANGE;
+      const seedMaxBin = activeBin.binId + SEED_RANGE;
+
+      const mmPositionKp = Keypair.generate();
+      const addLiqTx = await freshPool.initializePositionAndAddLiquidityByStrategy({
+        positionPubKey: mmPositionKp.publicKey,
+        user: mmUser.publicKey,
+        totalXAmount: new BN(100_000).mul(new BN(10 ** 9)),  // 100K tokens
+        totalYAmount: new BN(5 * LAMPORTS_PER_SOL),          // 5 SOL
+        strategy: {
+          maxBinId: seedMaxBin,
+          minBinId: seedMinBin,
+          strategyType: 0, // Spot
+        },
+      });
+
+      if (Array.isArray(addLiqTx)) {
+        for (const tx of addLiqTx) {
+          await sendSdkTx(tx, [mmUser, mmPositionKp]);
+        }
+      } else {
+        await sendSdkTx(addLiqTx, [mmUser, mmPositionKp]);
+      }
+      console.log("  Two-sided liquidity seeded: bins", seedMinBin, "to", seedMaxBin);
+
+      // ── posUser: deposit SOL collateral ──
+      [positionPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("position"), posUser.publicKey.toBuffer(), NATIVE_MINT.toBuffer()],
+        program.programId
+      );
+      [collateralVaultPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), posUser.publicKey.toBuffer(), NATIVE_MINT.toBuffer()],
+        program.programId
+      );
+
+      await program.methods.depositSolCollateral(depositAmount)
+        .accountsStrict({
+          user: posUser.publicKey, config: configPda, mint: NATIVE_MINT,
+          collateralConfig: collateralConfigPda, vault: collateralVaultPda,
+          position: positionPda, systemProgram: SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([posUser])
+        .rpc();
+
+      // ── posUser: open leveraged position on the fresh pool ──
+      await freshPool.refetchStates();
+      const currentActiveBin = await freshPool.getActiveBin();
+      const activeBinId = currentActiveBin.binId;
+
+      // Place bins on the wSOL side (one-sided wSOL deposit)
+      let minBinId: number, maxBinId: number;
+      if (isWsolX) {
+        minBinId = activeBinId + 1;
+        maxBinId = activeBinId + POSITION_WIDTH;
+      } else {
+        minBinId = activeBinId - POSITION_WIDTH + 1;
+        maxBinId = activeBinId;
+      }
+
+      // Ensure bins span two bin arrays (same logic as openPosition helper)
+      let lowerIdx = binArrayIndex(minBinId);
+      let upperIdx = binArrayIndex(maxBinId);
+      if (lowerIdx.eq(upperIdx)) {
+        const activeArrayIdx = binArrayIndex(activeBinId).toNumber();
+        const half = Math.floor(POSITION_WIDTH / 2);
+        if (isWsolX) {
+          let boundary = (activeArrayIdx + 1) * BIN_ARRAY_SIZE;
+          if (boundary - half <= activeBinId) boundary += BIN_ARRAY_SIZE;
+          minBinId = boundary - half;
+          maxBinId = minBinId + POSITION_WIDTH - 1;
+        } else {
+          let boundary = activeArrayIdx * BIN_ARRAY_SIZE;
+          if (boundary + (POSITION_WIDTH - 1 - half) > activeBinId) boundary -= BIN_ARRAY_SIZE;
+          minBinId = boundary - half;
+          maxBinId = minBinId + POSITION_WIDTH - 1;
+        }
+        lowerIdx = binArrayIndex(minBinId);
+        upperIdx = binArrayIndex(maxBinId);
+      }
+
+      await ensureFreshBinArrayExists(lowerIdx);
+      await ensureFreshBinArrayExists(upperIdx);
+
+      const fBinArrayLower = deriveFreshBinArrayPda(lowerIdx);
+      const fBinArrayUpper = deriveFreshBinArrayPda(upperIdx);
+
+      // wSOL reserve in the fresh pool
+      const reserve = isWsolX ? freshPool.lbPair.reserveX : freshPool.lbPair.reserveY;
+      const tokenMint = isWsolX ? freshPool.lbPair.tokenXMint : freshPool.lbPair.tokenYMint;
+
+      const binLiquidityDist = [];
+      for (let i = minBinId; i <= maxBinId; i++) {
+        binLiquidityDist.push({ binId: i, weight: 1000 });
+      }
+
+      // Refresh oracle timestamp
+      const [priceOracle] = PublicKey.findProgramAddressSync(
+        [Buffer.from("mock_oracle"), NATIVE_MINT.toBuffer()],
+        program.programId
+      );
+      await program.methods
+        .updateMockOracle(new BN(150_000_000))
+        .accountsStrict({ authority, config: configPda, mint: NATIVE_MINT, mockOracle: priceOracle })
+        .rpc();
+
+      metPositionKp = Keypair.generate();
+      await program.methods
+        .openPosition(
+          new BN(20_000), // 2x leverage
+          minBinId,
+          maxBinId - minBinId + 1,
+          activeBinId,
+          10,
+          binLiquidityDist
+        )
+        .accountsStrict({
+          user: posUser.publicKey,
+          config: configPda,
+          wsolMint: NATIVE_MINT,
+          position: positionPda,
+          lendingVault: lendingVaultPda,
+          wsolVault: wsolVaultPda,
+          collateralConfig: collateralConfigPda,
+          priceOracle,
+          metPosition: metPositionKp.publicKey,
+          lbPair: freshLbPair,
+          binArrayBitmapExtension: null,
+          reserve,
+          tokenMint,
+          binArrayLower: fBinArrayLower,
+          binArrayUpper: fBinArrayUpper,
+          eventAuthority: deriveEventAuthority(),
+          tokenProgram: TOKEN_PROGRAM_ID,
+          dlmmProgram: DLMM_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          rent: SYSVAR_RENT_PUBKEY,
+        })
+        .signers([posUser, metPositionKp])
+        .preInstructions([ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 })])
+        .rpc({ commitment: "confirmed" });
+
+      openedMinBinId = minBinId;
+      openedMaxBinId = maxBinId;
+
+      const pos = await program.account.position.fetch(positionPda);
+      debtBefore = pos.debtAmount;
+      console.log("  Position opened: bins", openedMinBinId, "to", openedMaxBinId,
+                  " debt:", debtBefore.toString());
+
+      // ── swapUser: sell customMint to push active bin THROUGH position's bins ──
+      // isWsolX=false: customMint is X, sell X get Y (wSOL), swapForY=true, bin moves DOWN
+      // isWsolX=true:  customMint is Y, sell Y get X (wSOL), swapForY=false, bin moves UP
+      const sellCustomForWsol = !isWsolX;
+
+      // Ensure swapUser has a wSOL ATA (receives swap proceeds)
+      await wrapSol(swapUser, swapUser.publicKey, 0.01 * LAMPORTS_PER_SOL);
+
+      await freshPool.refetchStates();
+      const swapAmount = new BN(5 * LAMPORTS_PER_SOL);
+      const binArraysForSwap = await freshPool.getBinArrayForSwap(sellCustomForWsol);
+      const swapQuote = freshPool.swapQuote(swapAmount, sellCustomForWsol, new BN(500), binArraysForSwap);
+
+      const inToken = sellCustomForWsol ? freshPool.tokenX.publicKey : freshPool.tokenY.publicKey;
+      const outToken = sellCustomForWsol ? freshPool.tokenY.publicKey : freshPool.tokenX.publicKey;
+
+      const swapTx = await freshPool.swap({
+        inToken,
+        outToken,
+        inAmount: swapAmount,
+        minOutAmount: swapQuote.minOutAmount,
+        lbPair: freshPool.pubkey,
+        user: swapUser.publicKey,
+        binArraysPubkey: swapQuote.binArraysPubkey,
+      });
+      await sendSdkTx(swapTx, [swapUser]);
+
+      await freshPool.refetchStates();
+      const newActiveBin = await freshPool.getActiveBin();
+      console.log("  Active bin after swap:", newActiveBin.binId,
+                  "(position range:", openedMinBinId, "to", openedMaxBinId, ")");
+    });
+
+    it("Closes in-range position with internal X to wSOL swap", async () => {
+      const vaultBefore = await program.account.lendingVault.fetch(lendingVaultPda);
+      const wsolVaultBalanceBefore = await provider.connection.getTokenAccountBalance(wsolVaultPda);
+
+      // Build close accounts for the fresh pool
+      await freshPool.refetchStates();
+      const lowerIdx = binArrayIndex(openedMinBinId);
+      const upperIdx = binArrayIndex(openedMaxBinId);
+      const fBinArrayLower = deriveFreshBinArrayPda(lowerIdx);
+      const fBinArrayUpper = deriveFreshBinArrayPda(upperIdx);
+
+      // Lending vault's ATA for the non-wSOL token (token X in the fresh pool)
+      const userTokenXAccount = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        provider.wallet.payer,
+        freshPool.lbPair.tokenXMint,
+        lendingVaultPda,
+        true
+      );
+
+      const accounts = {
+        user: posUser.publicKey,
+        config: configPda,
+        wsolMint: NATIVE_MINT,
+        position: positionPda,
+        lendingVault: lendingVaultPda,
+        wsolVault: wsolVaultPda,
+        metPosition: metPositionKp.publicKey,
+        lbPair: freshLbPair,
+        binArrayBitmapExtension: null,
+        userTokenX: userTokenXAccount.address,
+        reserveX: freshPool.lbPair.reserveX,
+        reserveY: freshPool.lbPair.reserveY,
+        tokenXMint: freshPool.lbPair.tokenXMint,
+        tokenYMint: freshPool.lbPair.tokenYMint,
+        binArrayLower: fBinArrayLower,
+        binArrayUpper: fBinArrayUpper,
+        oracle: freshPool.lbPair.oracle,
+        eventAuthority: deriveEventAuthority(),
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        dlmmProgram: DLMM_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      };
+
+      await program.methods
+        .closePosition(openedMinBinId, openedMaxBinId)
+        .accountsStrict(accounts)
+        .signers([posUser])
+        .preInstructions([ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 })])
+        .rpc({ commitment: "confirmed" })
+        .catch((e) => {
+          console.log("\n  closePosition error:", e.message);
+          if (e.logs) console.log("  logs:\n   ", e.logs.join("\n    "));
+          throw e;
+        });
+
+      const positionAfter = await program.account.position.fetch(positionPda);
+      expect(positionAfter.status).to.deep.equal(
+        { closed: {} },
+        "Position status must be Closed"
+      );
+      expect(positionAfter.debtAmount.toNumber()).to.equal(
+        0,
+        "debt_amount must be zeroed after close"
+      );
+
+      const vaultAfter = await program.account.lendingVault.fetch(lendingVaultPda);
+      expect(vaultAfter.totalBorrowed.toString()).to.equal(
+        vaultBefore.totalBorrowed.sub(debtBefore).toString(),
+        "totalBorrowed must decrease by the debt amount"
+      );
+
+      // Verify DLMM position account is gone
+      const metPositionInfo = await provider.connection.getAccountInfo(metPositionKp.publicKey);
+      expect(metPositionInfo).to.be.null;
+
+      // Verify token X ATA is empty (all swapped to wSOL)
+      const tokenXBalance = await provider.connection.getTokenAccountBalance(userTokenXAccount.address);
+      expect(tokenXBalance.value.amount).to.equal(
+        "0",
+        "All token X must be swapped to wSOL"
+      );
+
+      // Log the vault wSOL delta (shows the "loss" from price movement)
+      const wsolVaultBalanceAfter = await provider.connection.getTokenAccountBalance(wsolVaultPda);
+      const before = parseInt(wsolVaultBalanceBefore.value.amount);
+      const after = parseInt(wsolVaultBalanceAfter.value.amount);
+      const delta = after - before;
+      const borrowed = debtBefore.toNumber();
+
+      console.log("\n  Position status      : closed");
+      console.log("  Debt repaid          :", borrowed / LAMPORTS_PER_SOL, "SOL");
+      console.log("  wSOL vault before    :", before / LAMPORTS_PER_SOL, "SOL");
+      console.log("  wSOL vault after     :", after / LAMPORTS_PER_SOL, "SOL");
+      console.log("  Vault delta          :", delta / LAMPORTS_PER_SOL, "SOL");
+      console.log("  Token X ATA balance  : 0 (all swapped)");
+      console.log("  DLMM position        : closed on-chain");
+    });
+  });
+
 
   describe("closePosition — constraints", () => {
-    // A second user+position used for constraint tests — opened once, reused across tests.
     const constraintUser = Keypair.generate();
     let constraintPositionPda: PublicKey;
     let constraintMetPositionKp: Keypair;
@@ -583,7 +984,6 @@ describe("Close Position", () => {
     });
 
     it("Rejects close when position is not active (already closed)", async () => {
-      // Close the constraint position once first
       const { accounts } = await buildCloseAccounts(
         constraintUser.publicKey,
         constraintPositionPda,
@@ -599,7 +999,6 @@ describe("Close Position", () => {
         .preInstructions([ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 })])
         .rpc({ commitment: "confirmed" });
 
-      // Now try to close it again — must fail with PositionNotActive
       try {
         await program.methods
           .closePosition(constraintMinBinId, constraintMaxBinId)
@@ -615,20 +1014,15 @@ describe("Close Position", () => {
     });
 
     it("Rejects close by a different user", async () => {
-      // rogue tries to pass constraintUser's position PDA but signs with their own key.
-      // The seeds constraint derives position from user.key(), so mismatched signer
-      // produces a PDA that doesn't match the on-chain account.
       const rogue = Keypair.generate();
       const rogSig = await provider.connection.requestAirdrop(rogue.publicKey, 2 * LAMPORTS_PER_SOL);
       await provider.connection.confirmTransaction(rogSig);
 
-      // Derive what rogue thinks the accounts should be (their own position + vault)
       const [rogueFakePosition] = PublicKey.findProgramAddressSync(
         [Buffer.from("position"), rogue.publicKey.toBuffer(), NATIVE_MINT.toBuffer()],
         program.programId
       );
 
-      // Build close accounts as if rogue is the user — position PDA won't exist
       const { accounts: constraintAccounts } = await buildCloseAccounts(
         constraintUser.publicKey,
         constraintPositionPda,
@@ -646,7 +1040,6 @@ describe("Close Position", () => {
           .rpc();
         throw new Error("Should have failed");
       } catch (e) {
-        // seeds constraint: position PDA derived from rogue.key() ≠ constraintPositionPda
         expect((e as Error).message).to.match(/seeds|constraint|InvalidOwner|2006/i);
         console.log("  Correctly rejected close by wrong user");
       }

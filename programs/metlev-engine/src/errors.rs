@@ -61,4 +61,7 @@ pub enum ProtocolError {
 
     #[msg("Bad debt detected - insufficient collateral to cover debt")]
     BadDebt,
+
+    #[msg("Position is still active — close it before withdrawing collateral")]
+    PositionStillActive,
 }

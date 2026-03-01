@@ -11,7 +11,7 @@ import {
 } from "@solana/spl-token";
 import { assert, expect } from "chai";
 
-describe("Deposit Collateral", () => {
+describe("Collateral", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
@@ -153,6 +153,8 @@ describe("Deposit Collateral", () => {
     console.log("SOL Mint:", SOL_MINT.toBase58());
     console.log("USDC Mint:", USDC_MINT.toBase58());
   });
+
+  // ─── Deposit ──────────────────────────────────────────────────────────────
 
   describe("SOL Deposits", () => {
     it("Deposits SOL successfully", async () => {
@@ -527,5 +529,104 @@ describe("Deposit Collateral", () => {
         })
         .rpc();
     });
+  });
+
+  // ─── Withdraw Collateral ───────────────────────────────────────────────────
+
+  describe("Withdraw Collateral", () => {
+    const withdrawUser = Keypair.generate();
+    let positionPda: PublicKey;
+    let collateralVaultPda: PublicKey;
+
+    before(async () => {
+      const airdrop = await provider.connection.requestAirdrop(
+        withdrawUser.publicKey,
+        3 * LAMPORTS_PER_SOL
+      );
+      await provider.connection.confirmTransaction(airdrop);
+
+      [positionPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("position"), withdrawUser.publicKey.toBuffer(), SOL_MINT.toBuffer()],
+        program.programId
+      );
+
+      [collateralVaultPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), withdrawUser.publicKey.toBuffer(), SOL_MINT.toBuffer()],
+        program.programId
+      );
+
+      await program.methods
+        .depositSolCollateral(new anchor.BN(0.5 * LAMPORTS_PER_SOL))
+        .accountsStrict({
+          user: withdrawUser.publicKey,
+          config: configPda,
+          mint: SOL_MINT,
+          collateralConfig: solCollateralConfigPda,
+          vault: collateralVaultPda,
+          position: positionPda,
+          systemProgram: SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([withdrawUser])
+        .rpc();
+
+      console.log("\n=== Withdraw Collateral Setup ===");
+      console.log("withdrawUser:", withdrawUser.publicKey.toBase58());
+      console.log("position:", positionPda.toBase58());
+      console.log("collateralVault:", collateralVaultPda.toBase58());
+    });
+
+    it("Fails to withdraw collateral while position is still active", async () => {
+      const position = await program.account.position.fetch(positionPda);
+      expect(position.status).to.deep.equal({ active: {} });
+
+      try {
+        await program.methods
+          .withdrawCollateral()
+          .accountsStrict({
+            user: withdrawUser.publicKey,
+            wsolMint: SOL_MINT,
+            position: positionPda,
+            collateralVault: collateralVaultPda,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([withdrawUser])
+          .rpc();
+
+        assert.fail("Should have failed with PositionStillActive");
+      } catch (error) {
+        expect(error.message).to.include("PositionStillActive");
+        console.log("Correctly blocked withdrawal from an active position");
+      }
+    });
+
+    it("Fails when a different user tries to withdraw someone else's collateral", async () => {
+      const attacker = Keypair.generate();
+      const airdrop = await provider.connection.requestAirdrop(
+        attacker.publicKey,
+        LAMPORTS_PER_SOL
+      );
+      await provider.connection.confirmTransaction(airdrop);
+
+      try {
+        await program.methods
+          .withdrawCollateral()
+          .accountsStrict({
+            user: attacker.publicKey,         // attacker signs
+            wsolMint: SOL_MINT,
+            position: positionPda,            // victim's position
+            collateralVault: collateralVaultPda,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([attacker])
+          .rpc();
+
+        assert.fail("Should have failed with a seeds / owner constraint error");
+      } catch (error) {
+        expect(error.message).to.match(/seeds|constraint|InvalidOwner/i);
+        console.log("Correctly rejected withdrawal by wrong signer");
+      }
+    });
+
   });
 });

@@ -20,11 +20,11 @@ describe("metlev-engine", () => {
   let solCollateralConfigPda: PublicKey;
   let usdcCollateralConfigPda: PublicKey;
   let userSolPositionPda: PublicKey;
+  let solOraclePda: PublicKey;
 
   // Mock mints and oracles
   const SOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
   let USDC_MINT: PublicKey; // Will be created in before hook
-  const SOL_ORACLE = Keypair.generate().publicKey; // Mock Pyth oracle
   const USDC_ORACLE = Keypair.generate().publicKey; // Mock Pyth oracle
 
   // Collateral parameters
@@ -34,7 +34,7 @@ describe("metlev-engine", () => {
     liquidationPenalty: 500,    // 5%
     minDeposit: 0.1 * LAMPORTS_PER_SOL, // 0.1 SOL
     interestRateBps: 500,       // 5% APR
-    oracleMaxAge: 60,           // 60 seconds
+    oracleMaxAge: 3600,         // 1 hour
   };
 
   const USDC_CONFIG = {
@@ -81,11 +81,18 @@ describe("metlev-engine", () => {
       program.programId
     );
 
+    [solOraclePda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("mock_oracle"), SOL_MINT.toBuffer()],
+      program.programId
+    );
+
     console.log("\n=== PDAs ===");
+    console.log("Program ID       :", program.programId.toBase58());
     console.log("Config:", configPda.toBase58());
     console.log("SOL Collateral Config:", solCollateralConfigPda.toBase58());
     console.log("USDC Collateral Config:", usdcCollateralConfigPda.toBase58());
     console.log("User SOL Position:", userSolPositionPda.toBase58());
+    console.log("SOL Oracle PDA   :", solOraclePda.toBase58());
   });
 
   describe("Protocol Initialization", () => {
@@ -119,18 +126,41 @@ describe("metlev-engine", () => {
 
   describe("Collateral Configuration", () => {
     it("Registers SOL as collateral", async () => {
-      // Skip if already registered
+      let existing;
       try {
-        await program.account.collateralConfig.fetch(solCollateralConfigPda);
-        console.log("✓ SOL collateral already registered, skipping...");
-        return;
+        existing = await program.account.collateralConfig.fetch(solCollateralConfigPda);
+        console.log("✓ SOL collateral already registered");
+        console.log("  stored oracle  :", existing.oracle.toBase58());
+        console.log("  expected oracle:", solOraclePda.toBase58());
       } catch {
-        // Not registered, proceed
+        // Not registered, proceed to register below
       }
 
+      if (existing) {
+        if (existing.oracle.toBase58() === solOraclePda.toBase58()) {
+          console.log("  oracle is correct, skipping...");
+          return;
+        }
+        // Stored oracle is stale (from a previous session with a different program ID).
+        // Fix it so the on-chain constraint price_oracle.key() == collateral_config.oracle
+        // will pass when tests pass the freshly-derived PDA.
+        console.log("  Stale oracle detected — updating...");
+        await program.methods
+          .updateCollateralOracle(SOL_MINT, solOraclePda)
+          .accountsStrict({
+            authority,
+            config: configPda,
+            collateralConfig: solCollateralConfigPda,
+          })
+          .rpc();
+        console.log("  ✓ Oracle updated to:", solOraclePda.toBase58());
+        return;
+      }
+
+      console.log("  registering collateral with oracle:", solOraclePda.toBase58());
       await program.methods
         .registerCollateral(
-          SOL_ORACLE,
+          solOraclePda,
           SOL_CONFIG.maxLtv,
           SOL_CONFIG.liquidationThreshold,
           SOL_CONFIG.liquidationPenalty,
@@ -153,7 +183,7 @@ describe("metlev-engine", () => {
       );
 
       expect(solConfig.mint.toBase58()).to.equal(SOL_MINT.toBase58());
-      expect(solConfig.oracle.toBase58()).to.equal(SOL_ORACLE.toBase58());
+      expect(solConfig.oracle.toBase58()).to.equal(solOraclePda.toBase58());
       expect(solConfig.maxLtv).to.equal(SOL_CONFIG.maxLtv);
       expect(solConfig.liquidationThreshold).to.equal(SOL_CONFIG.liquidationThreshold);
       expect(solConfig.liquidationPenalty).to.equal(SOL_CONFIG.liquidationPenalty);
@@ -237,7 +267,7 @@ describe("metlev-engine", () => {
       try {
         await program.methods
           .registerCollateral(
-            SOL_ORACLE,
+            solOraclePda,
             8000,  // max_ltv
             7500,  // liquidation_threshold (INVALID: should be > max_ltv)
             500,

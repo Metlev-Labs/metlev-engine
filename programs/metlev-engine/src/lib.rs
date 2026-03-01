@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 use anchor_lang::prelude::*;
 
 mod state;
@@ -7,7 +8,8 @@ mod utils;
 
 use instructions::*;
 
-declare_id!("3hiGnNihh2eACtAU3d45cT6unWgwtPLsqKUmZE5kYma3");
+declare_id!("6ySvjJb41GBCBbtVvmaCd7cQUuzWFtqZ1SA931rEuSSx");
+declare_program!(dlmm);
 
 #[program]
 pub mod metlev_engine {
@@ -56,6 +58,7 @@ pub mod metlev_engine {
     ) -> Result<()> {
         ctx.accounts.deposit(&ctx.bumps, amount)
     }
+    
     pub fn supply(
         ctx: Context<Supply>,
         amount: u64,
@@ -68,11 +71,25 @@ pub mod metlev_engine {
     ) -> Result<()> {
         ctx.accounts.withdraw()
     }
+
+    /// Modified to include all DLMM and leverage parameters
     pub fn open_position(
         ctx: Context<OpenPosition>,
         leverage: u64,
+        lower_bin_id: i32,
+        width: i32,
+        active_id: i32,
+        max_active_bin_slippage: i32,
+        bin_liquidity_dist: Vec<dlmm::types::BinLiquidityDistributionByWeight>,
     ) -> Result<()> {
-        ctx.accounts.open(leverage)
+        ctx.accounts.open(
+            leverage,
+            lower_bin_id,
+            width,
+            active_id,
+            max_active_bin_slippage,
+            bin_liquidity_dist,
+        )
     }
 
     pub fn close_position(ctx: Context<ClosePosition>) -> Result<()> {
@@ -121,6 +138,14 @@ pub mod metlev_engine {
         min_deposit: u64,
     ) -> Result<()> {
         ctx.accounts.update_min_deposit(min_deposit)
+    }
+
+    pub fn update_collateral_oracle(
+        ctx: Context<UpdateCollateralConfig>,
+        _mint: Pubkey,
+        oracle: Pubkey,
+    ) -> Result<()> {
+        ctx.accounts.update_oracle(oracle)
     }
 
     pub fn initialize_mock_oracle(

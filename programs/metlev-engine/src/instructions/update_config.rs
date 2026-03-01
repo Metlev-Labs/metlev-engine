@@ -82,4 +82,9 @@ impl<'info> UpdateCollateralConfig<'info> {
         self.collateral_config.min_deposit = min_deposit;
         Ok(())
     }
+
+    pub fn update_oracle(&mut self, oracle: Pubkey) -> Result<()> {
+        self.collateral_config.oracle = oracle;
+        Ok(())
+    }
 }

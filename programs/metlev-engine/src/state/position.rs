@@ -42,6 +42,10 @@ impl Position {
         matches!(self.status, PositionStatus::Active)
     }
 
+    pub fn is_closed(&self) -> bool {
+        matches!(self.status, PositionStatus::Closed | PositionStatus::Liquidated)
+    }
+
     pub fn mark_closed(&mut self) {
         self.status = PositionStatus::Closed;
     }

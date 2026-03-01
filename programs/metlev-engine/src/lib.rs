@@ -92,8 +92,16 @@ pub mod metlev_engine {
         )
     }
 
-    pub fn close_position(ctx: Context<ClosePosition>) -> Result<()> {
-        ctx.accounts.close()
+    pub fn close_position(
+        ctx: Context<ClosePosition>,
+        from_bin_id: i32,
+        to_bin_id: i32,
+    ) -> Result<()> {
+        ctx.accounts.close(from_bin_id, to_bin_id)
+    }
+
+    pub fn withdraw_collateral(ctx: Context<WithdrawCollateral>) -> Result<()> {
+        ctx.accounts.withdraw(&ctx.bumps)
     }
 
     pub fn liquidate(ctx: Context<Liquidate>) -> Result<()> {

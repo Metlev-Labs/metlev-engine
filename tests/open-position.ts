@@ -19,32 +19,16 @@ import {
 } from "@solana/spl-token";
 import { expect } from "chai";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
 const DLMM_PROGRAM_ID = new PublicKey(
   "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"
 );
 const LB_PAIR = new PublicKey("9zUvxwFTcuumU6Dkq68wWEAiLEmA4sp1amdG96aY7Tmq");
-const BIN_RANGE = 5;
+
+const POSITION_WIDTH = 5;
 const BIN_ARRAY_SIZE = 70;
 
-// ─── PDA helpers ─────────────────────────────────────────────────────────────
 
-/**
- * Computes the bin array index for a given bin ID, matching DLMM's on-chain
- * Rust logic which uses truncating integer division:
- *
- *   index = (bin_id / 70) - (1 if bin_id % 70 < 0 else 0)
- *
- * This is equivalent to Rust's `bin_id / MAX_BIN_PER_ARRAY` for all integers,
- * including negatives.  JavaScript's `Math.trunc` replicates Rust truncation.
- *
- * Examples:
- *   binArrayIndex(-16127) → Math.trunc(-230.38) = -230, remainder = -16127 - (-230*70)
- *                         = -16127 + 16100 = -27, so -27 < 0 → index = -231
- *   binArrayIndex(-16131) → Math.trunc(-230.44) = -230, remainder = -31 < 0 → index = -231
- *   binArrayIndex(100)    → Math.trunc(1.42) = 1, remainder = 30, 30 >= 0 → index = 1
- */
+// Returns which bin array a bin belongs to, floor division for negatives.
 function binArrayIndex(binId: number): BN {
   const quotient = Math.trunc(binId / BIN_ARRAY_SIZE);
   const remainder = binId % BIN_ARRAY_SIZE;
@@ -53,12 +37,10 @@ function binArrayIndex(binId: number): BN {
 }
 
 function deriveBinArrayPda(lbPair: PublicKey, index: BN): PublicKey {
+  const indexBuf = Buffer.alloc(8);
+  indexBuf.writeBigInt64LE(BigInt(index.toString()));
   const [pda] = PublicKey.findProgramAddressSync(
-    [
-      Buffer.from("bin_array"),
-      lbPair.toBuffer(),
-      index.toArrayLike(Buffer, "le", 8),
-    ],
+    [Buffer.from("bin_array"), lbPair.toBuffer(), indexBuf],
     DLMM_PROGRAM_ID
   );
   return pda;
@@ -71,8 +53,6 @@ function deriveEventAuthority(): PublicKey {
   );
   return pda;
 }
-
-// ─── Test suite ───────────────────────────────────────────────────────────────
 
 describe("Open Position", () => {
   const provider = anchor.AnchorProvider.env();
@@ -91,12 +71,9 @@ describe("Open Position", () => {
   let collateralConfigPda: PublicKey;
   let lpPositionPda: PublicKey;
 
-  let userWsolAta: PublicKey;
   let lpWsolAta: PublicKey;
 
   let dlmmPool: DLMM;
-
-  // ─── Helpers ───────────────────────────────────────────────────────────────
 
   async function wrapSol(
     payer: Keypair,
@@ -126,15 +103,14 @@ describe("Open Position", () => {
     const info = await provider.connection.getAccountInfo(binArrayPda);
     if (info) return;
     console.log(`  Initialising bin array at index ${index.toString()} …`);
-    const initTxs = await dlmmPool.initializeBinArrays([index], authority);
-    for (const tx of initTxs) {
+    const ixs = await dlmmPool.initializeBinArrays([index], authority);
+    if (ixs.length > 0) {
+      const tx = new Transaction().add(...ixs);
       await provider.sendAndConfirm(tx);
     }
   }
 
-  // ─── before() ─────────────────────────────────────────────────────────────
-
-  before("Fund wallets, derive PDAs, seed vault", async () => {
+  before("Fund wallets, derive PDAs, seed vault", async function() {
     [configPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("config")],
       program.programId
@@ -164,10 +140,8 @@ describe("Open Position", () => {
       await provider.connection.confirmTransaction(sig);
     }
 
-    userWsolAta = await wrapSol(user, user.publicKey, 5 * LAMPORTS_PER_SOL);
-    lpWsolAta   = await wrapSol(lp,   lp.publicKey,  10 * LAMPORTS_PER_SOL);
+    lpWsolAta = await wrapSol(lp, lp.publicKey, 10 * LAMPORTS_PER_SOL);
 
-    // ── Initialize protocol config ──────────────────────────────────────────
     try {
       await program.account.config.fetch(configPda);
       console.log("  Config already initialised, skipping.");
@@ -183,7 +157,6 @@ describe("Open Position", () => {
       console.log("  Protocol config initialised.");
     }
 
-    // ── Initialize lending vault ────────────────────────────────────────────
     try {
       await program.account.lendingVault.fetch(lendingVaultPda);
       console.log("  Lending vault already initialised, skipping.");
@@ -203,7 +176,6 @@ describe("Open Position", () => {
       console.log("  Lending vault initialised.");
     }
 
-    // ── LP supplies wSOL ────────────────────────────────────────────────────
     const supplyAmount = new BN(8 * LAMPORTS_PER_SOL);
     try {
       await program.account.lpPosition.fetch(lpPositionPda);
@@ -226,7 +198,6 @@ describe("Open Position", () => {
       console.log("  LP supplied 8 wSOL to vault.");
     }
 
-    // ── User deposits collateral ────────────────────────────────────────────
     try {
       await program.account.position.fetch(positionPda);
       console.log("  ✓ User position already exists, skipping deposit.");
@@ -266,44 +237,67 @@ describe("Open Position", () => {
       );
     }
 
-    dlmmPool = await DLMM.create(provider.connection, LB_PAIR, {
-      cluster: "devnet",
-    });
-    await dlmmPool.refetchStates();
+    try {
+      dlmmPool = await DLMM.create(provider.connection, LB_PAIR, {
+        cluster: "devnet",
+      });
+      await dlmmPool.refetchStates();
+    } catch {
+      console.log("  ⚠ LB pair not found — skipping open position tests (requires devnet)");
+      this.skip();
+    }
 
     console.log("\n=== Setup Complete ===");
+    console.log("  Program ID        : ", program.programId.toBase58());
+    console.log("  collateralConfigPda:", collateralConfigPda.toBase58());
     console.log("  Lending Vault PDA : ", lendingVaultPda.toBase58());
     console.log("  wSOL Vault PDA    : ", wsolVaultPda.toBase58());
     console.log("  User Position PDA : ", positionPda.toBase58());
     console.log("  Pool (lb_pair)    : ", LB_PAIR.toBase58());
   });
 
-  // ─── Helper: build all accounts for openPosition ──────────────────────────
-
   async function buildOpenPositionAccounts(positionKeypair: Keypair) {
     await dlmmPool.refetchStates();
     const activeBin = await dlmmPool.getActiveBin();
     const activeBinId = activeBin.binId;
 
-    // Determine which token is wSOL in this pool
     const isWsolX = dlmmPool.lbPair.tokenXMint.equals(NATIVE_MINT);
 
-    // Pick bin range based on which side wSOL occupies:
-    //   wSOL is X → deposit above active bin (bins > active_id)
-    //   wSOL is Y → deposit at/below active bin (bins <= active_id)
+    const activeArrayIdx = binArrayIndex(activeBinId).toNumber();
+    const half = Math.floor(POSITION_WIDTH / 2);
+
     let minBinId: number;
     let maxBinId: number;
 
     if (isWsolX) {
       minBinId = activeBinId + 1;
-      maxBinId = activeBinId + BIN_RANGE;
+      maxBinId = activeBinId + POSITION_WIDTH;
     } else {
-      minBinId = activeBinId - BIN_RANGE + 1;
+      minBinId = activeBinId - POSITION_WIDTH + 1;
       maxBinId = activeBinId;
     }
 
+    let lowerIdx = binArrayIndex(minBinId);
+    let upperIdx = binArrayIndex(maxBinId);
+
+    if (lowerIdx.eq(upperIdx)) {
+      if (isWsolX) {
+        let boundary = (activeArrayIdx + 1) * BIN_ARRAY_SIZE;
+        if (boundary - half <= activeBinId) boundary += BIN_ARRAY_SIZE;
+        minBinId = boundary - half;
+        maxBinId = minBinId + POSITION_WIDTH - 1;
+      } else {
+        let boundary = activeArrayIdx * BIN_ARRAY_SIZE;
+        if (boundary + (POSITION_WIDTH - 1 - half) > activeBinId) boundary -= BIN_ARRAY_SIZE;
+        minBinId = boundary - half;
+        maxBinId = minBinId + POSITION_WIDTH - 1;
+      }
+      lowerIdx = binArrayIndex(minBinId);
+      upperIdx = binArrayIndex(maxBinId);
+    }
+
     const lowerBinId = minBinId;
-    const width = maxBinId - minBinId + 1; // should equal BIN_RANGE
+    const width = maxBinId - minBinId + 1;
 
     // Uniform weight distribution across all bins in range
     const binLiquidityDist: Array<{ binId: number; weight: number }> = [];
@@ -311,43 +305,20 @@ describe("Open Position", () => {
       binLiquidityDist.push({ binId: i, weight: 1000 });
     }
 
-    // Derive bin array indices using the corrected formula
-    const lowerIdx = binArrayIndex(minBinId);
-    const upperIdx = binArrayIndex(maxBinId);
-
-    // Initialise bin arrays if they don't exist yet
     await ensureBinArrayExists(lowerIdx);
-    if (!lowerIdx.eq(upperIdx)) {
-      await ensureBinArrayExists(upperIdx);
-    }
+    await ensureBinArrayExists(upperIdx);
 
     const binArrayLower = deriveBinArrayPda(LB_PAIR, lowerIdx);
     const binArrayUpper = deriveBinArrayPda(LB_PAIR, upperIdx);
-
-    // Note: binArrayLower === binArrayUpper is expected and valid when the
-    // entire range fits within one 70-bin window (as is the case here for
-    // bin range [-16131, -16127] which is fully within array index -231).
-    // DLMM accepts duplicate accounts for bin_array_lower / bin_array_upper.
 
     const reserve  = isWsolX ? dlmmPool.lbPair.reserveX  : dlmmPool.lbPair.reserveY;
     const tokenMint = isWsolX ? dlmmPool.lbPair.tokenXMint : dlmmPool.lbPair.tokenYMint;
     const eventAuthority = deriveEventAuthority();
 
-    const collateralCfgState = await program.account.collateralConfig.fetch(
-      collateralConfigPda
+    const [priceOracle] = PublicKey.findProgramAddressSync(
+      [Buffer.from("mock_oracle"), NATIVE_MINT.toBuffer()],
+      program.programId
     );
-    const priceOracle: PublicKey = collateralCfgState.oracle;
-
-    // ── met_position keypair: NO pre-allocation ─────────────────────────────
-    //
-    // Do NOT call SystemProgram.createAccount for positionKeypair.
-    // DLMM's initialize_position uses #[account(init)] which:
-    //   1. Verifies the account is uninitialized (owned by SystemProgram).
-    //   2. Allocates space and assigns ownership to DLMM via an inner CPI.
-    //   3. Writes the 8-byte discriminator.
-    //
-    // Pre-allocating the account causes Error 3001 AccountDiscriminatorNotFound
-    // because DLMM finds an already-DLMM-owned account with zero data.
 
     return {
       params: {
@@ -392,12 +363,9 @@ describe("Open Position", () => {
     };
   }
 
-  // ─── Tests ────────────────────────────────────────────────────────────────
-
   describe("openPosition — happy path", () => {
     it("Opens a 2× leveraged DLMM position and deposits wSOL", async () => {
-      // Generate a fresh keypair for the DLMM position.
-      // This account MUST NOT exist on-chain — DLMM creates it in the CPI.
+      // This account MUST NOT exist on-chain DLMM creates it in the CPI.
       const metPositionKp = Keypair.generate();
 
       const { params, accounts, meta } = await buildOpenPositionAccounts(metPositionKp);
@@ -408,19 +376,24 @@ describe("Open Position", () => {
       console.log(`    Bin range      : [${meta.minBinId}, ${meta.maxBinId}]`);
       console.log("    Bin array lower:", meta.binArrayLower.toBase58());
       console.log("    Bin array upper:", meta.binArrayUpper.toBase58());
-      if (meta.binArrayLower.equals(meta.binArrayUpper)) {
-        console.log("    (lower == upper: same bin array window — valid for DLMM)");
-      }
 
       const vaultBefore    = await program.account.lendingVault.fetch(lendingVaultPda);
       const wsolBefore     = await provider.connection.getTokenAccountBalance(wsolVaultPda);
 
-      // ── Execute openPosition ────────────────────────────────────────────
-      // Signers:
-      //   - user           → pays rent for DLMM position, satisfies Signer<user>
-      //   - metPositionKp  → enables inner system_program::create_account CPI
-      //
-      // NO preInstructions — met_position must be uninitialized.
+      const mockOraclePda = accounts.priceOracle;
+      console.log("\n  priceOracle (mockOraclePda):", mockOraclePda.toBase58());
+
+      // Refresh oracle timestamp so the staleness check passes
+      await program.methods
+        .updateMockOracle(new BN(150_000_000))
+        .accountsStrict({
+          authority,
+          config: configPda,
+          mint: NATIVE_MINT,
+          mockOracle: mockOraclePda,
+        })
+        .rpc();
+
       const tx = await program.methods
         .openPosition(
           params.leverage,
@@ -435,30 +408,31 @@ describe("Open Position", () => {
         .preInstructions([
           ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
         ])
-        .rpc({ commitment: "confirmed" });
+        .rpc({ commitment: "confirmed" })
+        .catch((e) => {
+          console.log("\n  openPosition error:", e.message);
+          if (e.logs) console.log("  logs:\n   ", e.logs.join("\n    "));
+          throw e;
+        });
 
       console.log("\n  openPosition tx:", tx);
 
-      // ── Assertions ─────────────────────────────────────────────────────
       const positionState  = await program.account.position.fetch(positionPda);
       const expectedBorrow = positionState.collateralAmount
         .mul(params.leverage)
         .divn(10_000);
 
-      // 1. Protocol position records the correct debt amount
       expect(positionState.debtAmount.toString()).to.equal(
         expectedBorrow.toString(),
         "debtAmount mismatch"
       );
 
-      // 2. Vault total_borrowed increased by borrow amount
       const vaultAfter = await program.account.lendingVault.fetch(lendingVaultPda);
       expect(vaultAfter.totalBorrowed.toString()).to.equal(
         vaultBefore.totalBorrowed.add(expectedBorrow).toString(),
         "totalBorrowed mismatch"
       );
 
-      // 3. wSOL vault balance decreased by borrow amount
       const wsolAfter = await provider.connection.getTokenAccountBalance(wsolVaultPda);
       const delta = Number(wsolBefore.value.amount) - Number(wsolAfter.value.amount);
       expect(delta).to.equal(
@@ -466,7 +440,6 @@ describe("Open Position", () => {
         "wSOL vault delta mismatch"
       );
 
-      // 4. DLMM position account exists and is owned by the DLMM program
       const metPositionInfo = await provider.connection.getAccountInfo(
         metPositionKp.publicKey
       );
@@ -508,8 +481,6 @@ describe("Open Position", () => {
       console.log("\n  ✓ Total position liquidity:", totalLiquidity);
     });
   });
-
-  // ─── Constraint tests ─────────────────────────────────────────────────────
 
   describe("openPosition — constraints", () => {
     it("Rejects when protocol is paused", async () => {
@@ -608,7 +579,6 @@ describe("Open Position", () => {
     });
 
     it("Rejects when the wrong user tries to open against someone else's position", async () => {
-      // Fund a rogue actor
       const rogue = Keypair.generate();
       const sig = await provider.connection.requestAirdrop(
         rogue.publicKey,
@@ -618,13 +588,8 @@ describe("Open Position", () => {
 
       const metPositionKp = Keypair.generate();
 
-      // Build accounts using the legitimate user's position PDA
       const { params, accounts } = await buildOpenPositionAccounts(metPositionKp);
 
-      // Replace user with rogue — position.owner constraint will reject this
-      // because position.owner == user.publicKey != rogue.publicKey.
-      // Note: no createPositionIx here, so we don't have a fromPubkey: user
-      // issue causing a false "Signature verification failed" error.
       try {
         await program.methods
           .openPosition(
@@ -643,9 +608,6 @@ describe("Open Position", () => {
           .rpc();
         throw new Error("Should have failed");
       } catch (e) {
-        // Anchor will fail with a seeds/constraint error because position PDA
-        // is derived with user.publicKey, not rogue.publicKey.
-        // The error may surface as seeds/constraint violation or InvalidOwner.
         expect((e as Error).message).to.match(
           /InvalidOwner|seeds|constraint|AccountNotFound|2006/i
         );

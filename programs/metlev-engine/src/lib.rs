@@ -8,7 +8,7 @@ mod utils;
 
 use instructions::*;
 
-declare_id!("3hiGnNihh2eACtAU3d45cT6unWgwtPLsqKUmZE5kYma3");
+declare_id!("6ySvjJb41GBCBbtVvmaCd7cQUuzWFtqZ1SA931rEuSSx");
 declare_program!(dlmm);
 
 #[program]
@@ -138,6 +138,14 @@ pub mod metlev_engine {
         min_deposit: u64,
     ) -> Result<()> {
         ctx.accounts.update_min_deposit(min_deposit)
+    }
+
+    pub fn update_collateral_oracle(
+        ctx: Context<UpdateCollateralConfig>,
+        _mint: Pubkey,
+        oracle: Pubkey,
+    ) -> Result<()> {
+        ctx.accounts.update_oracle(oracle)
     }
 
     pub fn initialize_mock_oracle(

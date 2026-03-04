@@ -236,6 +236,18 @@ describe("Close Position", () => {
       true // allowOwnerOffCurve — lending_vault is a PDA
     );
 
+    const userWsolAta = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      provider.wallet.payer,
+      NATIVE_MINT,
+      user
+    );
+
+    const [collateralVault] = PublicKey.findProgramAddressSync(
+      [Buffer.from("vault"), user.toBuffer(), NATIVE_MINT.toBuffer()],
+      program.programId
+    );
+
     return {
       accounts: {
         user,
@@ -244,6 +256,8 @@ describe("Close Position", () => {
         position: positionPda,
         lendingVault: lendingVaultPda,
         wsolVault: wsolVaultPda,
+        userWsolAta: userWsolAta.address,
+        collateralVault,
         metPosition: metPositionPubkey,
         lbPair: LB_PAIR,
         binArrayBitmapExtension: null,
@@ -845,6 +859,9 @@ describe("Close Position", () => {
     it("Closes in-range position with internal X to wSOL swap", async () => {
       const vaultBefore = await program.account.lendingVault.fetch(lendingVaultPda);
       const wsolVaultBalanceBefore = await provider.connection.getTokenAccountBalance(wsolVaultPda);
+      const positionBefore = await program.account.position.fetch(positionPda);
+      const collateralBefore = positionBefore.collateralAmount.toNumber();
+      const collateralVaultLamportsBefore = await provider.connection.getBalance(collateralVaultPda);
 
       // Build close accounts for the fresh pool
       await freshPool.refetchStates();
@@ -862,6 +879,18 @@ describe("Close Position", () => {
         true
       );
 
+      const posUserWsolAta = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        provider.wallet.payer,
+        NATIVE_MINT,
+        posUser.publicKey
+      );
+
+      const [posCollateralVault] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault"), posUser.publicKey.toBuffer(), NATIVE_MINT.toBuffer()],
+        program.programId
+      );
+
       const accounts = {
         user: posUser.publicKey,
         config: configPda,
@@ -869,6 +898,8 @@ describe("Close Position", () => {
         position: positionPda,
         lendingVault: lendingVaultPda,
         wsolVault: wsolVaultPda,
+        userWsolAta: posUserWsolAta.address,
+        collateralVault: posCollateralVault,
         metPosition: metPositionKp.publicKey,
         lbPair: freshLbPair,
         binArrayBitmapExtension: null,
@@ -926,18 +957,46 @@ describe("Close Position", () => {
         "All token X must be swapped to wSOL"
       );
 
-      // Log the vault wSOL delta (shows the "loss" from price movement)
+      // Verify collateral was used to cover shortfall
       const wsolVaultBalanceAfter = await provider.connection.getTokenAccountBalance(wsolVaultPda);
       const before = parseInt(wsolVaultBalanceBefore.value.amount);
       const after = parseInt(wsolVaultBalanceAfter.value.amount);
       const delta = after - before;
       const borrowed = debtBefore.toNumber();
 
+      // LP proceeds < debt → shortfall covered from collateral
+      // After cover_shortfall, vault delta == debt (shortfall was added from collateral).
+      // So: shortfall = collateralBefore - collateralAfter
+      const collateralAfter = positionAfter.collateralAmount.toNumber();
+      const collateralUsed = collateralBefore - collateralAfter;
+      const collateralVaultLamportsAfter = await provider.connection.getBalance(collateralVaultPda);
+      const collateralVaultDelta = collateralVaultLamportsBefore - collateralVaultLamportsAfter;
+
+      expect(collateralUsed).to.be.greaterThan(
+        0,
+        "Collateral must decrease when LP lost value (shortfall covered from collateral)"
+      );
+      expect(collateralAfter).to.be.lessThan(
+        collateralBefore,
+        "position.collateral_amount must be reduced by the shortfall"
+      );
+      expect(collateralVaultDelta).to.equal(
+        collateralUsed,
+        "Collateral vault lamports must decrease by exactly the shortfall amount"
+      );
+      expect(delta).to.equal(
+        borrowed,
+        "Vault delta must equal full debt (shortfall topped up from collateral)"
+      );
+
       console.log("\n  Position status      : closed");
       console.log("  Debt repaid          :", borrowed / LAMPORTS_PER_SOL, "SOL");
       console.log("  wSOL vault before    :", before / LAMPORTS_PER_SOL, "SOL");
       console.log("  wSOL vault after     :", after / LAMPORTS_PER_SOL, "SOL");
       console.log("  Vault delta          :", delta / LAMPORTS_PER_SOL, "SOL");
+      console.log("  Collateral before    :", collateralBefore / LAMPORTS_PER_SOL, "SOL");
+      console.log("  Collateral after     :", collateralAfter / LAMPORTS_PER_SOL, "SOL");
+      console.log("  Shortfall covered    :", collateralUsed / LAMPORTS_PER_SOL, "SOL");
       console.log("  Token X ATA balance  : 0 (all swapped)");
       console.log("  DLMM position        : closed on-chain");
     });

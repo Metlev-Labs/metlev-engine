@@ -1,6 +1,9 @@
 use anchor_lang::prelude::*;
+use anchor_lang::system_program::{self, Transfer as SystemTransfer};
 use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
+use anchor_spl::token_interface::{
+    transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
+};
 use crate::state::{Config, Position, LendingVault};
 use crate::errors::ProtocolError;
 use crate::dlmm;
@@ -35,7 +38,6 @@ pub struct ClosePosition<'info> {
     )]
     pub lending_vault: Box<Account<'info, LendingVault>>,
 
-    /// Receives the wSOL proceeds (token Y) from DLMM remove_liquidity / swap.
     #[account(
         mut,
         seeds = [b"wsol_vault", lending_vault.key().as_ref()],
@@ -45,7 +47,23 @@ pub struct ClosePosition<'info> {
     )]
     pub wsol_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// DLMM position — owned by lending_vault, not a signer on close.
+    #[account(
+        init_if_needed,
+        payer = user,
+        associated_token::mint = wsol_mint,
+        associated_token::authority = user,
+        associated_token::token_program = token_program,
+    )]
+    pub user_wsol_ata: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: PDA validated by seeds.
+    #[account(
+        mut,
+        seeds = [b"vault", user.key().as_ref(), wsol_mint.key().as_ref()],
+        bump,
+    )]
+    pub collateral_vault: UncheckedAccount<'info>,
+
     /// CHECK: Verified by the DLMM program.
     #[account(mut)]
     pub met_position: UncheckedAccount<'info>,
@@ -58,7 +76,6 @@ pub struct ClosePosition<'info> {
     #[account(mut)]
     pub bin_array_bitmap_extension: Option<UncheckedAccount<'info>>,
 
-    /// Lending vault's token X ATA — created if it doesn't exist yet.
     /// Any X-side tokens returned by remove_liquidity land here, then get swapped to wSOL.
     #[account(
         init_if_needed,
@@ -90,7 +107,7 @@ pub struct ClosePosition<'info> {
     #[account(mut)]
     pub bin_array_upper: UncheckedAccount<'info>,
 
-    /// CHECK: Pool TWAP oracle — required by DLMM swap to update price tracking.
+    /// CHECK: Pool TWAP oracle required by DLMM swap to update price tracking.
     #[account(mut)]
     pub oracle: UncheckedAccount<'info>,
 
@@ -111,12 +128,15 @@ pub struct ClosePosition<'info> {
 impl<'info> ClosePosition<'info> {
     pub fn close(
         &mut self,
+        bumps: &ClosePositionBumps,
         from_bin_id: i32,
         to_bin_id: i32,
     ) -> Result<()> {
         let vault_bump = self.lending_vault.bump;
         let signer_seeds: &[&[&[u8]]] = &[&[LendingVault::SEED_PREFIX, &[vault_bump]]];
         let debt = self.position.debt_amount;
+
+        let vault_before = self.wsol_vault.amount;
 
         self.cpi_remove_liquidity(signer_seeds, from_bin_id, to_bin_id)?;
         self.cpi_claim_fee(signer_seeds)?;
@@ -129,8 +149,35 @@ impl<'info> ClosePosition<'info> {
 
         self.cpi_close_position(signer_seeds)?;
 
+        self.wsol_vault.reload()?;
+        let vault_after = self.wsol_vault.amount;
+        let proceeds = vault_after.saturating_sub(vault_before);
+
+        // If LP lost value (proceeds < debt), cover shortfall from collateral.
+        // Transfer SOL from collateral vault wsol_vault, then sync_native
+        // so the wSOL token balance reflects the added lamports.
+        if proceeds < debt {
+            let shortfall = debt
+                .checked_sub(proceeds)
+                .ok_or(ProtocolError::MathOverflow)?;
+            let covered = std::cmp::min(shortfall, self.position.collateral_amount);
+            if covered > 0 {
+                self.cover_shortfall(bumps, covered)?;
+                self.position.collateral_amount = self.position.collateral_amount
+                    .checked_sub(covered)
+                    .ok_or(ProtocolError::MathOverflow)?;
+            }
+        }
+
         self.position.debt_amount = 0;
         self.lending_vault.repay(debt)?;
+
+        // If LP gained value (proceeds > debt), send surplus to user.
+        let surplus = proceeds.saturating_sub(debt);
+        if surplus > 0 {
+            self.transfer_surplus(signer_seeds, surplus)?;
+        }
+
         self.position.mark_closed();
         Ok(())
     }
@@ -245,5 +292,61 @@ impl<'info> ClosePosition<'info> {
             signer_seeds,
         );
         dlmm::cpi::close_position(ctx)
+    }
+
+    /// Transfer SOL from collateral vault to wsol_vault and sync_native
+    /// to cover the debt shortfall when LP lost value.
+    #[inline(never)]
+    fn cover_shortfall(&self, bumps: &ClosePositionBumps, amount: u64) -> Result<()> {
+        let user_key = self.user.key();
+        let mint_key = self.wsol_mint.key();
+        let vault_bump_arr = [bumps.collateral_vault];
+        let collateral_seeds: &[&[&[u8]]] = &[&[
+            b"vault",
+            user_key.as_ref(),
+            mint_key.as_ref(),
+            &vault_bump_arr,
+        ]];
+
+        // Add lamports to wsol_vault token account
+        system_program::transfer(
+            CpiContext::new_with_signer(
+                self.system_program.to_account_info(),
+                SystemTransfer {
+                    from: self.collateral_vault.to_account_info(),
+                    to:   self.wsol_vault.to_account_info(),
+                },
+                collateral_seeds,
+            ),
+            amount,
+        )?;
+
+        // Sync wSOL token balance to match new lamports
+        let ix = anchor_spl::token::spl_token::instruction::sync_native(
+            &anchor_spl::token::spl_token::id(),
+            &self.wsol_vault.key(),
+        )
+        .map_err(|_| ProtocolError::MathOverflow)?;
+        anchor_lang::solana_program::program::invoke(
+            &ix,
+            &[self.wsol_vault.to_account_info()],
+        )?;
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn transfer_surplus(&self, signer_seeds: &[&[&[u8]]], amount: u64) -> Result<()> {
+        let ctx = CpiContext::new_with_signer(
+            self.token_program.to_account_info(),
+            TransferChecked {
+                from:      self.wsol_vault.to_account_info(),
+                mint:      self.wsol_mint.to_account_info(),
+                to:        self.user_wsol_ata.to_account_info(),
+                authority: self.lending_vault.to_account_info(),
+            },
+            signer_seeds,
+        );
+        transfer_checked(ctx, amount, self.wsol_mint.decimals)
     }
 }

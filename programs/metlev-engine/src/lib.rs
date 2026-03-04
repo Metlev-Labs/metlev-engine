@@ -97,16 +97,20 @@ pub mod metlev_engine {
         from_bin_id: i32,
         to_bin_id: i32,
     ) -> Result<()> {
-        ctx.accounts.close(from_bin_id, to_bin_id)
+        ctx.accounts.close(&ctx.bumps, from_bin_id, to_bin_id)
     }
 
     pub fn withdraw_collateral(ctx: Context<WithdrawCollateral>) -> Result<()> {
         ctx.accounts.withdraw(&ctx.bumps)
     }
 
-    pub fn liquidate(ctx: Context<Liquidate>) -> Result<()> {
-        ctx.accounts.liquidate()
-    }
+    // pub fn liquidate(
+    //     ctx: Context<Liquidate>,
+    //     from_bin_id: i32,
+    //     to_bin_id: i32,
+    // ) -> Result<()> {
+    //     ctx.accounts.liquidate(&ctx.bumps, from_bin_id, to_bin_id)
+    // }
 
     pub fn update_pause_state(
         ctx: Context<UpdateConfig>,

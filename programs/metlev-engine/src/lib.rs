@@ -104,13 +104,13 @@ pub mod metlev_engine {
         ctx.accounts.withdraw(&ctx.bumps)
     }
 
-    // pub fn liquidate(
-    //     ctx: Context<Liquidate>,
-    //     from_bin_id: i32,
-    //     to_bin_id: i32,
-    // ) -> Result<()> {
-    //     ctx.accounts.liquidate(&ctx.bumps, from_bin_id, to_bin_id)
-    // }
+    pub fn liquidate(
+        ctx: Context<Liquidate>,
+        from_bin_id: i32,
+        to_bin_id: i32,
+    ) -> Result<()> {
+        ctx.accounts.liquidate(&ctx.bumps, from_bin_id, to_bin_id)
+    }
 
     pub fn update_pause_state(
         ctx: Context<UpdateConfig>,

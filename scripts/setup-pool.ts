@@ -1,16 +1,21 @@
 /**
  * setup-pool.ts
  *
- * Creates a DLMM pool on devnet with wSOL as one side and seeds it with
- * two-sided liquidity so leveraged positions can be opened.
+ * Creates a DLMM pool on devnet with wSOL (Y) and a custom token (X),
+ * seeds it with thin two-sided liquidity for demo purposes.
  *
- * Uses wSOL/wSOL pool (both sides are wSOL) for simplicity —
- * the protocol only deposits wSOL-side liquidity anyway.
+ * Pool is designed so small swaps (~0.5 SOL) visibly move the active bin.
+ * The CLI wallet keeps ~498 tokens for "whale" sell/buy demo swaps.
+ *
+ * Demo flow:
+ *   1. User supplies SOL to lending vault
+ *   2. User deposits collateral + opens 2x leveraged position (5 bins)
+ *   3. Whale sells tokens → active bin sweeps through user's position → fees!
+ *   4. Whale buys back → position refunded
+ *   5. User closes → profit visible
  *
  * Usage:
  *   anchor run setup-pool
- *
- * Outputs the LB_PAIR address to use in the frontend constants.
  */
 
 import * as anchor from "@coral-xyz/anchor";
@@ -59,7 +64,8 @@ async function main() {
   );
   console.log("  Custom mint:", customMint.toBase58());
 
-  // Step 2: Mint tokens and wrap SOL for seeding liquidity
+  // Step 2: Mint tokens and wrap SOL
+  // Mint 500 tokens — 2 go to pool seed, ~498 stay in wallet for whale swaps
   console.log("[2/4] Minting tokens and wrapping SOL...");
 
   const customAta = await getOrCreateAssociatedTokenAccount(
@@ -74,18 +80,18 @@ async function main() {
     customMint,
     customAta.address,
     authority,
-    BigInt(100_000) * BigInt(10 ** 9) // 100K tokens
+    BigInt(500) * BigInt(10 ** 9) // 500 tokens
   );
-  console.log("  Minted 100K custom tokens");
+  console.log("  Minted 500 custom tokens (2 for pool, ~498 for whale swaps)");
 
-  // Wrap SOL for liquidity seeding
+  // Wrap SOL for liquidity seeding + whale buy-back swaps
   const wsolAta = await getOrCreateAssociatedTokenAccount(
     connection,
     provider.wallet.payer,
     NATIVE_MINT,
     authority
   );
-  const wrapAmount = 2 * LAMPORTS_PER_SOL;
+  const wrapAmount = 5 * LAMPORTS_PER_SOL;
   const wrapTx = new Transaction().add(
     SystemProgram.transfer({
       fromPubkey: authority,
@@ -95,17 +101,17 @@ async function main() {
     createSyncNativeInstruction(wsolAta.address)
   );
   await provider.sendAndConfirm(wrapTx);
-  console.log("  Wrapped 2 SOL");
+  console.log("  Wrapped 5 SOL (2 for pool, ~3 reserve)");
 
   // Step 3: Create the DLMM pool
   console.log("[3/4] Creating DLMM pool...");
   const createPoolTx = await (DLMM as any).createCustomizablePermissionlessLbPair(
     connection,
-    new BN(10),           // binStep (10 bps = 0.1%)
+    new BN(200),          // binStep (200 bps = 2% per bin)
     customMint,           // token X
     NATIVE_MINT,          // token Y (wSOL)
     new BN(0),            // activeId
-    new BN(50),           // feeBps (0.5%)
+    new BN(1000),          // feeBps (10%)
     0,                    // activationType = Slot
     false,                // hasAlphaVault
     authority,            // creator
@@ -114,7 +120,6 @@ async function main() {
     { cluster: "devnet" }
   );
 
-  // Send with explicit fee payer
   createPoolTx.feePayer = authority;
   createPoolTx.recentBlockhash = (
     await connection.getLatestBlockhash()
@@ -123,7 +128,6 @@ async function main() {
     provider.wallet.payer,
   ]);
 
-  // Derive the pool address
   const [lbPair] = (DLMM as any).deriveCustomizablePermissionlessLbPair(
     customMint,
     NATIVE_MINT,
@@ -131,7 +135,10 @@ async function main() {
   );
   console.log("  Pool created:", lbPair.toBase58());
 
-  // Step 4: Seed two-sided liquidity
+  // Step 4: Seed thin two-sided liquidity
+  // 2 tokens + 2 SOL across ±20 bins (41 bins)
+  // = ~0.05 SOL/bin and ~0.05 token/bin
+  // A 0.5 SOL swap moves the bin ~10 positions — very visual!
   console.log("[4/4] Seeding two-sided liquidity...");
   const dlmmPool = await DLMM.create(connection, lbPair, {
     cluster: "devnet",
@@ -139,7 +146,7 @@ async function main() {
   await dlmmPool.refetchStates();
 
   const activeBin = await dlmmPool.getActiveBin();
-  const SEED_RANGE = 30;
+  const SEED_RANGE = 20;
   const seedMinBin = activeBin.binId - SEED_RANGE;
   const seedMaxBin = activeBin.binId + SEED_RANGE;
 
@@ -147,8 +154,8 @@ async function main() {
   const addLiqTx = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
     positionPubKey: mmPositionKp.publicKey,
     user: authority,
-    totalXAmount: new BN(50_000).mul(new BN(10 ** 9)), // 50K custom tokens
-    totalYAmount: new BN(1 * LAMPORTS_PER_SOL),         // 1 SOL
+    totalXAmount: new BN(2).mul(new BN(10 ** 9)),       // 2 tokens
+    totalYAmount: new BN(2 * LAMPORTS_PER_SOL),          // 2 SOL
     strategy: {
       maxBinId: seedMaxBin,
       minBinId: seedMinBin,
@@ -179,7 +186,8 @@ async function main() {
   }
 
   const isWsolX = dlmmPool.lbPair.tokenXMint.equals(NATIVE_MINT);
-  console.log("  Liquidity seeded: bins", seedMinBin, "to", seedMaxBin);
+  console.log("  Liquidity seeded: bins", seedMinBin, "to", seedMaxBin, "(41 bins)");
+  console.log("  Per bin: ~0.05 SOL + ~0.05 token");
 
   // Summary
   console.log("\n=== Pool Ready ===");
@@ -188,9 +196,18 @@ async function main() {
   console.log("Token X       :", dlmmPool.lbPair.tokenXMint.toBase58(), isWsolX ? "(wSOL)" : "(custom)");
   console.log("Token Y       :", dlmmPool.lbPair.tokenYMint.toBase58(), !isWsolX ? "(wSOL)" : "(custom)");
   console.log("Active Bin    :", activeBin.binId);
-  console.log("Bin Step      : 10 bps (0.1%)");
-  console.log("Reserve X     :", dlmmPool.lbPair.reserveX.toBase58());
-  console.log("Reserve Y     :", dlmmPool.lbPair.reserveY.toBase58());
+  console.log("Bin Step      : 200 bps (2% per bin)");
+  console.log("Fee           : 1000 bps (10%)");
+
+  console.log("\n=== Demo Plan ===");
+  console.log("1. Supply 5 SOL to lending vault (LP)");
+  console.log("2. Deposit 1 SOL collateral + open 2x leveraged position");
+  console.log("3. Whale: sell ~1.5 SOL worth of tokens to sweep through position bins");
+  console.log("4. Whale: buy ~1.5 SOL of tokens to restore position");
+  console.log("5. Close position — show fees earned!");
+
+  console.log("\nCLI wallet has ~498 tokens for whale swaps.");
+  console.log("Send tokens to Phantom via: spl-token transfer", customMint.toBase58(), "<amount> <phantom-address> --fund-recipient");
   console.log("");
   console.log("Update LB_PAIR in metlev-frontend/src/lib/dlmm.ts with:");
   console.log(`  export const LB_PAIR = new PublicKey("${lbPair.toBase58()}");`);

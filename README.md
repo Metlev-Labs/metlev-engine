@@ -81,7 +81,9 @@ scripts/
 ├── init-protocol.ts                         # Bootstrap protocol on devnet
 ├── update-oracle.ts                         # Update mock oracle price
 ├── supply.ts                                # Supply wSOL to lending vault
-└── withdraw-lp.ts                           # Withdraw wSOL + interest from vault
+├── withdraw-lp.ts                           # Withdraw wSOL + interest from vault
+├── setup-pool.ts                            # Create DLMM pool on devnet
+└── force-liquidate.ts                       # Force-liquidate a stuck position
 ```
 
 ### State Accounts
@@ -381,15 +383,44 @@ The pipeline:
 5. Installs Node dependencies (yarn cache)
 6. Runs `anchor build` + `anchor test`
 
-## Future Enhancements (Post-POC)
+## Known Limitations (V1)
 
-- Dynamic APY based on vault utilization (kink rate model)
-- Multiple leverage presets (2x, 3x, 5x)
-- Auto-rebalancing based on volatility
-- Fee compounding / auto-reinvestment
-- Partial position closes
-- Integration with real lending protocols (Kamino, Solend)
+### Static LTV / Health Check
+
+The current health check uses the **static collateral and debt amounts** recorded at position open time. Since both collateral and debt are denominated in SOL, oracle price changes cancel out and do not affect the LTV ratio.
+
+In reality, the DLMM position value can diverge from the original debt:
+- **Price moves through the position's bins** → SOL gets swapped to the paired token (impermanent loss)
+- **On close/liquidation**, the LP proceeds may be less than the original borrowed amount
+- The protocol handles this correctly at settlement (bad debt absorption, shortfall from collateral), but the **health check cannot detect it in advance**
+
+**V2 fix**: Compute dynamic health by reading the DLMM position's bin shares on-chain and calculating their current SOL-equivalent value against the outstanding debt. This requires cross-program reads of Meteora's position and bin array accounts.
+
+### Same-Asset Collateral and Debt
+
+V1 uses SOL as both collateral and borrowed asset. This means:
+- LTV is fixed at open time and never changes from market movements
+- Liquidation can only be triggered by admin threshold changes or DLMM position value loss (which isn't tracked)
+
+**V2 fix**: Support cross-asset collateral (e.g., deposit USDC, borrow SOL). When SOL price rises, debt value increases relative to collateral, naturally pushing LTV up and enabling market-driven liquidations.
+
+## Future Enhancements (V2+)
+
+### Health & Risk
+- Dynamic health factor based on live DLMM position value
+- Cross-asset collateral (USDC, mSOL, jitoSOL)
 - Real oracle integration (Pyth, Switchboard)
+- Partial liquidations
+
+### Yield & Capital Efficiency
+- Dynamic APY based on vault utilization (kink rate model)
+- Fee compounding / auto-reinvestment
+- Auto-rebalancing based on volatility
+- Partial position closes
+
+### Infrastructure
+- Multiple leverage presets (2x, 3x, 5x)
+- Integration with real lending protocols (Kamino, Solend)
 - Support for additional DLMM pairs
 - Frontend dashboard
 
@@ -418,6 +449,9 @@ The pipeline:
 - [x] Liquidation system with collateral-based penalty distribution
 - [x] Collateral withdrawal after position closed
 - [x] Admin config updates (pause, LTV params, penalty, oracle, min deposit, enable/disable)
-- [x] Deployment scripts (init-protocol, update-oracle, supply, withdraw-lp)
-- [ ] Frontend dashboard
+- [x] Deployment scripts (init-protocol, update-oracle, supply, withdraw-lp, setup-pool, force-liquidate)
+- [x] Frontend dashboard (Next.js + wallet adapter)
+- [x] DLMM pool setup script for devnet
+- [ ] Dynamic health factor based on live DLMM position value
+- [ ] Cross-asset collateral support
 - [ ] Dynamic APY based on vault utilization (kink rate model)

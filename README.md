@@ -39,10 +39,10 @@ This protocol uses a **per-collateral configuration pattern** (similar to Aave, 
 - Users can hold multiple positions with different collateral types simultaneously
 
 **Benefits:**
-- ✅ **Risk-appropriate parameters** - Volatile assets (SOL) have lower LTV than stablecoins (USDC)
-- ✅ **Scalability** - Add new collaterals without code changes
-- ✅ **Flexibility** - Adjust parameters per asset based on market conditions
-- ✅ **Capital efficiency** - Users can optimize based on their preferred collateral
+- Risk-appropriate parameters - Volatile assets (SOL) have lower LTV than stablecoins (USDC)
+- Scalability - Add new collaterals without code changes
+- Flexibility - Adjust parameters per asset based on market conditions
+- Capital efficiency - Users can optimize based on their preferred collateral
 
 ### Program Structure
 ```
@@ -63,17 +63,27 @@ programs/
         │   ├── deposit_sol_collateral.rs    # Deposit SOL as collateral
         │   ├── deposit_token_collateral.rs  # Deposit SPL tokens as collateral
         │   ├── initialize_lending_vault.rs  # Create and seed the lending vault
-        │   ├── supply.rs                    # LP supplies SOL to the vault
-        │   ├── withdraw.rs                  # LP withdraws SOL + interest
+        │   ├── supply.rs                    # LP supplies wSOL to the vault
+        │   ├── withdraw.rs                  # LP withdraws wSOL + interest
         │   ├── open_position.rs             # Create leveraged DLMM position
-        │   ├── close_position.rs            # Close position and repay debt
+        │   ├── close_position.rs            # Close position, repay debt, handle shortfall
+        │   ├── withdraw_collateral.rs       # Withdraw collateral after position closed
         │   ├── liquidate.rs                 # Force-close unhealthy positions
+        │   ├── mock_oracle.rs               # Mock oracle for testing/demo
         │   └── update_config.rs             # Update protocol/collateral parameters
         ├── utils/
         │   ├── mod.rs                       # Utility exports
-        │   ├── health.rs                    # Health factor calculations
+        │   ├── health.rs                    # Health factor / LTV calculations
         │   └── oracle.rs                    # Price oracle helpers
         └── errors.rs                        # Custom error definitions
+
+scripts/
+├── init-protocol.ts                         # Bootstrap protocol on devnet
+├── update-oracle.ts                         # Update mock oracle price
+├── supply.ts                                # Supply wSOL to lending vault
+├── withdraw-lp.ts                           # Withdraw wSOL + interest from vault
+├── setup-pool.ts                            # Create DLMM pool on devnet
+└── force-liquidate.ts                       # Force-liquidate a stuck position
 ```
 
 ### State Accounts
@@ -127,20 +137,19 @@ pub struct Position {
 - Users can have multiple positions with different collateral types
 - Each position is isolated per collateral mint
 
-**LendingVault (On-Chain SOL Vault)**
+**LendingVault (On-Chain wSOL Vault)**
 ```rust
 pub struct LendingVault {
-    pub total_supplied: u64,    // Total SOL supplied by LPs
-    pub total_borrowed: u64,    // Total SOL currently borrowed
+    pub total_supplied: u64,    // Total wSOL supplied by LPs
+    pub total_borrowed: u64,    // Total wSOL currently borrowed
     pub interest_rate_bps: u16, // Annual interest rate in basis points
     pub bump: u8,               // LendingVault PDA bump
-    pub vault_bump: u8,         // sol_vault PDA bump (for CPI signing)
+    pub vault_bump: u8,         // wsol_vault PDA bump (for CPI signing)
 }
 ```
 - PDA: `["lending_vault"]`
-- Paired with a `sol_vault` SystemAccount PDA that holds the actual lamports
-- `sol_vault` PDA: `["sol_vault", lending_vault]`
-- Seeded with rent-exempt minimum on initialization
+- Paired with a `wsol_vault` token account PDA that holds wSOL
+- `wsol_vault` PDA: `["wsol_vault", lending_vault]`
 - Tracks total supplied and borrowed for utilization calculations
 
 **LpPosition (Per-LP Supplier State)**
@@ -153,97 +162,34 @@ pub struct LpPosition {
     pub bump: u8,
 }
 ```
-- PDA: `["lp_position", lp, lending_vault]`
+- PDA: `["lp_position", lp]`
 - Created via `init_if_needed` to support top-up deposits
 - Interest accrues using simple interest: `principal * rate_bps * elapsed / (365 * 24 * 3600 * 10000)`
 - Closed (rent returned) on full withdrawal
 
-## Implementation Steps
+### Instruction Flow
 
-### Phase 1: Core Infrastructure 
-1. **Project Setup**
-   - Initialize Anchor project structure
-   - Define state accounts (Config, CollateralConfig, Position, LendingVault)
-   - Create custom error types
-   - Set up test environment
+**Open Position**
+1. User deposits SOL collateral into PDA vault (`["vault", owner, mint]`)
+2. Protocol checks LTV against oracle price
+3. Borrows wSOL from lending vault (updates `total_borrowed`)
+4. CPI to Meteora DLMM: creates position and adds one-sided wSOL liquidity
+5. Records debt and DLMM position reference on `Position` account
 
-2. **Basic Instructions**
-   - `initialize` - Set up global protocol config (authority, pause state)
-   - `register_collateral` - Register new collateral types with risk parameters
-   - `deposit_collateral` - Accept deposits for any enabled collateral
-   - Base account validation and PDA derivation
+**Close Position**
+1. CPI to Meteora DLMM: removes all liquidity and closes position
+2. If LP received non-wSOL token (token X), swaps it back to wSOL via DLMM
+3. If proceeds >= debt: repay debt, send surplus to user's wSOL ATA
+4. If proceeds < debt: cover shortfall from user's collateral vault (native SOL -> wSOL via `sync_native`)
+5. Marks position as `Closed`
 
-### Phase 2: Position Management
-3. **Open Position Logic**
-   - `open_position` - Create leveraged DLMM position
-   - Integrate mock lending vault for borrowing
-   - CPI to Meteora DLMM to create LP position
-   - Store position reference and debt tracking
-
-4. **Close Position Logic**
-   - `close_position` - Unwind position voluntarily
-   - CPI to Meteora to remove liquidity
-   - Repay debt to lending vault
-   - Return remaining collateral to user
-
-### Phase 3: Risk Management
-5. **Health Monitoring**
-   - Integrate price oracle (Pyth/Switchboard/magicblock)
-   - Implement health factor calculation
-   - LTV calculation based on collateral value vs debt
-
-6. **Liquidation System**
-   - `liquidate` - Force-close unhealthy positions
-   - Health check validation
-   - Liquidator incentive distribution
-   - Bad debt handling
-
-### Phase 4: Testing & Refinement
-7. **Comprehensive Testing**
-   - Unit tests for all instructions
-   - Integration tests with Meteora devnet
-   - Liquidation scenario testing
-   - Oracle edge case handling
-
-8. **Security Hardening**
-   - Reentrancy protection
-   - Oracle staleness checks
-   - Overflow/underflow validation
-   - Access control verification
-
-## Key Technical Challenges
-
-### 1. **Meteora DLMM Integration**
-- **Challenge**: CPI to Meteora to create/close DLMM positions
-- **Solution**: Study Meteora SDK and program interface, implement proper account passing
-
-### 2. **Health Factor Calculation**
-- **Challenge**: Accurately value DLMM position + account for impermanent loss
-- **Solution**: Oracle-based collateral pricing, conservative LTV ratios
-
-### 3. **Debt Accounting**
-- **Challenge**: Track borrowed amounts and interest accrual
-- **Solution**: Simple interest model in POC, store principal + timestamp
-
-### 4. **Liquidation Mechanics**
-- **Challenge**: Ensure liquidations are profitable and timely
-- **Solution**: Clear threshold + liquidator incentives, anyone can liquidate
-
-### 5. **Oracle Integration**
-- **Challenge**: Reliable price feeds for SOL/USDC
-- **Solution**: Pyth oracle integration with staleness checks
-
-## User Stories (POC Scope)
-
-### Experienced Solana LP
-- **Deposit collateral** - Deposit SOL or USDC to open positions
-- **Open leveraged position** - Create DLMM LP with borrowed funds
-- **View position status** - Check health factor and liquidation risk
-- **Close position** - Exit position, repay debt, withdraw collateral
-
-### Liquidator / Keeper
-- **Check position health** - Monitor positions for liquidation
-- **Force-close unsafe positions** - Liquidate unhealthy positions for reward
+**Liquidation**
+1. Anyone can call `liquidate` on a position where LTV > `liquidation_threshold`
+2. CPI to Meteora DLMM: removes all liquidity and closes position
+3. LP proceeds repay debt to lending vault
+4. Liquidation penalty (% of collateral) sent to liquidator as native SOL
+5. Remaining collateral returned to position owner
+6. Marks position as `Liquidated`
 
 ## Risk Parameters (POC)
 
@@ -254,10 +200,10 @@ Risk parameters are **per-collateral**, allowing different configurations for vo
 |-----------|-------|-------------|
 | Max LTV | 75% | Maximum loan-to-value ratio |
 | Liquidation Threshold | 80% | Health factor triggers liquidation |
-| Liquidation Penalty | 5% | Penalty paid to liquidator |
+| Liquidation Penalty | 5% | Penalty paid to liquidator from collateral |
 | Min Deposit | 0.1 SOL | Minimum deposit amount |
 | Interest Rate | 5% APR | Borrow rate for SOL positions |
-| Oracle Max Age | 60 seconds | Max staleness for price feeds |
+| Oracle Max Age | 1 hour | Max staleness for price feeds |
 
 ### USDC Collateral (Stablecoin)
 | Parameter | Value | Description |
@@ -267,7 +213,7 @@ Risk parameters are **per-collateral**, allowing different configurations for vo
 | Liquidation Penalty | 3% | Lower penalty (less risk) |
 | Min Deposit | 10 USDC | Minimum deposit amount |
 | Interest Rate | 3% APR | Lower rate for stable collateral |
-| Oracle Max Age | 60 seconds | Max staleness for price feeds |
+| Oracle Max Age | 1 hour | Max staleness for price feeds |
 
 > **Note**: Each collateral type can be added via `register_collateral` instruction with custom parameters.
 
@@ -277,7 +223,6 @@ Risk parameters are **per-collateral**, allowing different configurations for vo
 [dependencies]
 anchor-lang = "0.32.1"
 anchor-spl = { version = "0.32.1", features = ["token"] }
-pyth-solana-receiver-sdk = "0.2.0"  # Oracle integration
 ```
 
 ## Getting Started
@@ -298,7 +243,7 @@ yarn install
 # Build the program
 anchor build
 
-# Run tests
+# Run tests (requires local validator with Meteora DLMM)
 anchor test
 ```
 
@@ -316,49 +261,115 @@ refactor/<name>  # Code refactoring
 
 The hook is automatically configured when you run `yarn install`.
 
-## Testing Strategy
+## Devnet Deployment
 
-### Unit Tests
-- Config initialization
-- Collateral deposit/withdrawal
-- Debt accounting
-- Health factor calculation
-- Liquidation threshold logic
+### 1. Build and Deploy
 
-### Integration Tests
-- Full position lifecycle (deposit → open → close)
-- Liquidation scenarios (healthy → unhealthy → liquidated)
-- Oracle price updates
-- Multi-user interactions
+```bash
+# Build the program
+anchor build
 
-### Devnet Testing
-- Deploy to Solana devnet
-- Test with real Meteora DLMM pools
-- Monitor liquidation bot behavior
-- Validate oracle integration
+# Deploy to devnet (IDL is uploaded automatically by Anchor 0.32+)
+anchor deploy --provider.cluster devnet
+```
+
+### 2. Initialize Protocol
+
+All scripts require `ANCHOR_PROVIDER_URL` and `ANCHOR_WALLET` env vars, or use `anchor run` which reads from `Anchor.toml`.
+
+```bash
+# Set env for devnet
+export ANCHOR_PROVIDER_URL=https://api.devnet.solana.com
+export ANCHOR_WALLET=~/.config/solana/id.json
+
+# Initialize protocol (config, oracle, collateral config, lending vault)
+anchor run init-protocol
+
+# Supply wSOL to the lending vault as LP
+anchor run supply -- 8
+```
+
+### 3. Demo Scripts
+
+```bash
+# Update oracle price (for demoing LTV changes and liquidations)
+anchor run update-oracle -- 150    # Set SOL = $150
+anchor run update-oracle -- 80     # Drop to $80 (triggers liquidation)
+anchor run update-oracle -- 200    # Pump to $200
+
+# Supply / withdraw from lending vault
+anchor run supply -- 5             # Supply 5 wSOL as LP
+anchor run withdraw-lp             # Withdraw all supplied wSOL + interest
+```
+
+### Devnet Addresses
+
+| Account | PDA Seeds | Description |
+|---------|-----------|-------------|
+| Program | `6ySvjJb41GBCBbtVvmaCd7cQUuzWFtqZ1SA931rEuSSx` | Program ID |
+| Config | `["config"]` | Protocol config |
+| Lending Vault | `["lending_vault"]` | Vault accounting |
+| wSOL Vault | `["wsol_vault", lending_vault]` | wSOL token account |
+| SOL Collateral Config | `["collateral_config", NATIVE_MINT]` | SOL risk params |
+| Mock Oracle (SOL) | `["mock_oracle", NATIVE_MINT]` | Mock price oracle |
+| User Position | `["position", owner, mint]` | Per-user position |
+| Collateral Vault | `["vault", owner, mint]` | Per-user collateral (native SOL) |
+
+## Testing
+
+### Test Suite (58 tests)
+
+```
+Close Position (5 tests)
+  - Closes DLMM position, repays debt, marks position Closed
+  - Withdraws SOL collateral and closes position account
+  - Closes in-range (losing) position with shortfall covered from collateral
+  - Rejects close when position is not active
+  - Rejects close by a different user
+
+Collateral (8 tests)
+  - SOL deposits (success, wrong mint, below minimum)
+  - SPL token deposits (USDC success, wrong mint, below minimum)
+  - Protocol pause prevents deposits
+  - Withdraw collateral (blocked while active, wrong signer rejected)
+
+Lending Vault (10 tests)
+  - Vault initialization and state verification
+  - LP supply, top-up, multiple LPs
+  - Constraints (unauthorized init, double init, no position withdraw)
+  - LP withdrawal with wSOL return
+
+Liquidation (2 tests)
+  - Liquidates unhealthy position, penalty from collateral to liquidator
+  - Rejects liquidation of healthy position
+
+Protocol Config (20 tests)
+  - Initialization, collateral registration, risk param validation
+  - Deposit collateral, pause/unpause, config updates
+  - Multiple positions per user
+
+Mock Oracle (6 tests)
+  - Initialize, update price, timestamp refresh, auth checks
+
+Open Position (5 tests)
+  - Opens 2x leveraged DLMM position with wSOL
+  - Verifies DLMM position has liquidity via SDK
+  - Rejects when paused, LTV exceeded, insufficient liquidity, wrong user
+```
+
+Run tests:
+```bash
+anchor test
+```
 
 ## Security Considerations
 
-1. **Oracle Manipulation** - Use staleness checks, multiple oracle sources
-2. **Flash Loan Attacks** - Position changes require minimum time delays
-3. **Bad Debt Accumulation** - Conservative LTV ratios, liquidation buffers
-4. **CPI Reentrancy** - Proper account validation and state checks
-
-## Future Enhancements (Post-POC)
-
-- Multiple leverage presets (2x, 3x, 5x)
-- Auto-rebalancing based on volatility
-- Fee compounding / auto-reinvestment
-- Partial position closes
-- Integration with real lending protocols (Kamino, Solana)
-- Support for additional DLMM pairs
-
-## Resources
-
-- [Meteora DLMM Docs](https://docs.meteora.ag/dlmm-documentation)
-- [Pyth Oracle Docs](https://docs.pyth.network/price-feeds/solana-price-feeds)
-- [Anchor Framework](https://www.anchor-lang.com/)
-- [Turbin3 Program](https://www.turbin3.org/)
+1. **Oracle Manipulation** - Staleness checks on mock oracle, per-collateral `oracle_max_age`
+2. **Collateral Isolation** - Each user's collateral held in separate PDA vault
+3. **Shortfall Coverage** - LP losses covered from user collateral via `sync_native` pattern
+4. **Liquidation Incentives** - Penalty taken from collateral (not LP proceeds) ensures liquidator profit
+5. **Access Control** - Position operations require owner signature, admin ops require authority
+6. **Protocol Pause** - Emergency pause halts deposits and position opening
 
 ## CI/CD
 
@@ -372,20 +383,75 @@ The pipeline:
 5. Installs Node dependencies (yarn cache)
 6. Runs `anchor build` + `anchor test`
 
+## Known Limitations (V1)
+
+### Static LTV / Health Check
+
+The current health check uses the **static collateral and debt amounts** recorded at position open time. Since both collateral and debt are denominated in SOL, oracle price changes cancel out and do not affect the LTV ratio.
+
+In reality, the DLMM position value can diverge from the original debt:
+- **Price moves through the position's bins** → SOL gets swapped to the paired token (impermanent loss)
+- **On close/liquidation**, the LP proceeds may be less than the original borrowed amount
+- The protocol handles this correctly at settlement (bad debt absorption, shortfall from collateral), but the **health check cannot detect it in advance**
+
+**V2 fix**: Compute dynamic health by reading the DLMM position's bin shares on-chain and calculating their current SOL-equivalent value against the outstanding debt. This requires cross-program reads of Meteora's position and bin array accounts.
+
+### Same-Asset Collateral and Debt
+
+V1 uses SOL as both collateral and borrowed asset. This means:
+- LTV is fixed at open time and never changes from market movements
+- Liquidation can only be triggered by admin threshold changes or DLMM position value loss (which isn't tracked)
+
+**V2 fix**: Support cross-asset collateral (e.g., deposit USDC, borrow SOL). When SOL price rises, debt value increases relative to collateral, naturally pushing LTV up and enabling market-driven liquidations.
+
+## Future Enhancements (V2+)
+
+### Health & Risk
+- Dynamic health factor based on live DLMM position value
+- Cross-asset collateral (USDC, mSOL, jitoSOL)
+- Real oracle integration (Pyth, Switchboard)
+- Partial liquidations
+
+### Yield & Capital Efficiency
+- Dynamic APY based on vault utilization (kink rate model)
+- Fee compounding / auto-reinvestment
+- Auto-rebalancing based on volatility
+- Partial position closes
+
+### Infrastructure
+- Multiple leverage presets (2x, 3x, 5x)
+- Integration with real lending protocols (Kamino, Solend)
+- Support for additional DLMM pairs
+- Frontend dashboard
+
+## Resources
+
+- [Meteora DLMM Docs](https://docs.meteora.ag/dlmm-documentation)
+- [Anchor Framework](https://www.anchor-lang.com/)
+- [Turbin3 Program](https://www.turbin3.org/)
+
 ## Project Status
 
-🚧 **In Development** - POC Phase
+**Feature Complete** - All core protocol functionality implemented and tested (58 tests passing).
 
 - [x] Project planning and requirements
 - [x] Project skeleton and base structure
-- [x] Core state accounts (Config, Position, LendingVault, LpPosition)
+- [x] Core state accounts (Config, Position, LendingVault, LpPosition, CollateralConfig)
 - [x] Base instructions (initialize, register_collateral, deposit_collateral)
 - [x] Lending vault (initialize_lending_vault, supply, withdraw with interest accrual)
 - [x] Lending vault test suite with constraint validation
 - [x] CI/CD pipeline (GitHub Actions) with Solana/Anchor/Rust caching
 - [x] Branch naming enforcement (git hook + CI check)
-- [ ] Position opening (Meteora DLMM integration via CPI)
-- [ ] Health monitoring (oracle integration)
-- [ ] Liquidation system
+- [x] Open position with Meteora DLMM CPI (one-sided wSOL liquidity)
+- [x] Close position with debt repayment, surplus return, and shortfall coverage from collateral
+- [x] Mock oracle for price feeds (initialize, update)
+- [x] Health monitoring with oracle-based LTV calculation
+- [x] Liquidation system with collateral-based penalty distribution
+- [x] Collateral withdrawal after position closed
+- [x] Admin config updates (pause, LTV params, penalty, oracle, min deposit, enable/disable)
+- [x] Deployment scripts (init-protocol, update-oracle, supply, withdraw-lp, setup-pool, force-liquidate)
+- [x] Frontend dashboard (Next.js + wallet adapter)
+- [x] DLMM pool setup script for devnet
+- [ ] Dynamic health factor based on live DLMM position value
+- [ ] Cross-asset collateral support
 - [ ] Dynamic APY based on vault utilization (kink rate model)
-- [ ] Full integration testing and deployment

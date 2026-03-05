@@ -200,6 +200,8 @@ impl<'info> OpenPosition<'info> {
             },
         )?;
 
+        self.position.meteora_position = self.met_position.key();
+
         Ok(())
     }
 }

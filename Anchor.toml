@@ -8,12 +8,19 @@ skip-lint = false
 [programs.localnet]
 metlev_engine = "6ySvjJb41GBCBbtVvmaCd7cQUuzWFtqZ1SA931rEuSSx"
 
+[programs.devnet]
+metlev_engine = "6ySvjJb41GBCBbtVvmaCd7cQUuzWFtqZ1SA931rEuSSx"
+
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
+init-protocol = "npx ts-node scripts/init-protocol.ts"
+update-oracle = "npx ts-node scripts/update-oracle.ts"
+supply = "npx ts-node scripts/supply.ts"
+withdraw-lp = "npx ts-node scripts/withdraw-lp.ts"

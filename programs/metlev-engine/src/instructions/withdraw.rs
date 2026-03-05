@@ -51,12 +51,8 @@ pub struct Withdraw<'info> {
 
 impl<'info> Withdraw<'info> {
     pub fn withdraw(&mut self) -> Result<()> {
-        // TODO: update later for algo-based dynamic APY
-        self.lp_position.accrue_interest(
-            self.lending_vault.interest_rate_bps,
-            Clock::get()?.unix_timestamp,
-        );
-        let amount = self.lp_position.claimable();
+        // TODO: interest should come from borrower repayments, not time-based accrual
+        let amount = self.lp_position.supplied_amount;
 
         require!(
             self.wsol_vault.amount >= amount,
